@@ -83,8 +83,8 @@ def init_session_state():
         'processing_status': 'idle', 'pdf_doc': None, 'current_page': 0,
         'total_pages': 0, 'extracted_pages': [], 'project_name': None,
         'next_batch_start_index': 0, 'uploaded_filename': None,
-        'api_key': os.environ.get("OPENAI_API_KEY", ""), 
-        'model': 'gpt-4o-mini',  # ZMIANA: Ustawienie nowego domyślnego modelu
+        'api_key': st.secrets.get("openai", {}).get("api_key"),
+        'model': 'gpt-4o-mini',
         'meta_tags': {}
     }
     for key, value in defaults.items():
@@ -210,13 +210,12 @@ INSTRUKCJE SPECJALNE: Oczyszczanie i Kontekst
 DOZWOLONE MODYFIKACJE STRUKTURALNE:
 1.  **Tytuł Główny (`# Tytuł`)**:
     - **ZNAJDŹ go w tekście**. To często krótka linia bez kropki na końcu.
-    - **Absolutny zakaz** wymyślania tytułów. Jeśli go nie ma, nie dodawaj go.
 2.  **Śródtytuły (`## Śródtytuł`) - Twój kluczowy obowiązek**:
     - Celem jest przekształcenie 'ściany tekstu' w czytelny artykuł.
     - Gdy tekst zawiera kilka następujących po sobie akapitów omawiających różne przykłady, technologie lub firmy, **MUSISZ** je rozdzielić trafnymi, zwięzłymi śródtytułami.
 3.  **Pogrubienia (`**tekst**`)**:
     - Stosuj je, by wyróżnić **kluczowe terminy, nazwy własne i frazy ważne dla SEO**.
-    - W dłuższych akapitach pogrub **jedno kluczowe zdanie lub wniosek**, aby ułatwić szybkie czytanie.
+    - W dłuższych akapitach pogrub ważne informacje, aby ułatwić szybkie czytanie.
 4.  **Podział na sekcje**:
      - Jeśli tekst na stronie wyraźnie zawiera **dwa lub więcej niepowiązanych ze sobą tematów**, oddziel je linią horyzontalną (`---`).
 
@@ -235,22 +234,14 @@ TEKST DO PRZETWORZENIA:
     for attempt in range(MAX_RETRIES + 1):
         content = ""
         try:
-            # ZMIANA: Inteligentny przełącznik API w zależności od modelu
-            if "gpt-5" in model:
-                response = await client.responses.create(
-                    model=model, input=prompt,
-                    reasoning={"effort": "low"}, text={"verbosity": "low"},
-                )
-                content = response.output_text
-            else: # Domyślne dla GPT-4o, GPT-4, etc.
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                    max_tokens=2048
-                )
-                content = response.choices[0].message.content
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=2048
+            )
+            content = response.choices[0].message.content
 
             if not content: raise ValueError("API zwróciło pustą odpowiedź.")
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
@@ -294,23 +285,14 @@ TEKST ARTYKUŁU:
     for attempt in range(MAX_RETRIES + 1):
         content = ""
         try:
-            # ZMIANA: Inteligentny przełącznik API w zależności od modelu
-            if "gpt-5" in model:
-                response = await client.responses.create(
-                    model=model, input=prompt,
-                    reasoning={"effort": "low"}, text={"verbosity": "low"},
-                )
-                content = response.output_text
-            else:
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    temperature=0.5,
-                    max_tokens=200
-                )
-                content = response.choices[0].message.content
-
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.5,
+                max_tokens=200
+            )
+            content = response.choices[0].message.content
             if not content: raise ValueError("API zwróciło pustą odpowiedź.")
             return json.loads(content)
         except (json.JSONDecodeError, ValueError) as e:
@@ -346,16 +328,6 @@ def render_sidebar():
         uploaded_file = st.file_uploader("Wybierz plik PDF", type="pdf")
         if uploaded_file and uploaded_file.name != st.session_state.uploaded_filename:
             handle_file_upload(uploaded_file)
-        st.divider()
-        st.subheader("🤖 Konfiguracja AI")
-        st.session_state.api_key = st.text_input("Klucz API OpenAI", type="password", value=st.session_state.api_key)
-        
-        # ZMIANA: Zaktualizowana lista modeli z gpt-4o-mini na początku
-        st.session_state.model = st.selectbox(
-            "Model AI", 
-            ["gpt-4o-mini", "gpt-4o", "gpt-5-nano", "gpt-5-mini", "gpt-5"], 
-            index=0
-        )
         
         if st.session_state.pdf_doc:
             st.divider()
@@ -381,7 +353,7 @@ def handle_file_upload(uploaded_file):
     st.rerun()
 
 def start_ai_processing():
-    if not st.session_state.api_key: st.error("⚠️ Proszę podać klucz API OpenAI."); return
+    if not st.session_state.api_key: st.error("⚠️ Klucz API OpenAI nie jest skonfigurowany w sekretach."); return
     st.session_state.processing_status = 'in_progress'; st.session_state.next_batch_start_index = 0
     st.session_state.extracted_pages = [None] * st.session_state.total_pages
 
@@ -472,6 +444,19 @@ def render_page_content():
 
 def main():
     st.title("🚀 Redaktor AI - Interaktywny Procesor PDF")
+    
+    if not st.session_state.api_key:
+        st.error("Brak klucza API OpenAI!")
+        st.info("""
+            Proszę skonfiguruj swój klucz API w pliku `.streamlit/secrets.toml`.
+            Plik powinien zawierać:
+            ```toml
+            [openai]
+            api_key = "sk-..."
+            ```
+        """)
+        st.stop()
+
     render_sidebar()
     if not st.session_state.pdf_doc:
         st.info("👋 Witaj! Aby rozpocząć, wgraj plik PDF lub załaduj istniejący projekt z panelu bocznego."); return
