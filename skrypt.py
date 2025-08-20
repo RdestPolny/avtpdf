@@ -10,6 +10,34 @@ import re
 import asyncio
 from openai import AsyncOpenAI
 
+# --- Tekst Instrukcji ---
+INSTRUCTIONS_MD = """
+### Witaj w Redaktorze AI! Oto krótki przewodnik, jak zacząć:
+
+**Krok 1: Rozpocznij Projekt**
+*   **Nowy plik PDF**: Użyj przycisku **"Wybierz plik PDF"** w panelu bocznym, aby wgrać swój dokument. Aplikacja automatycznie utworzy nowy projekt na podstawie nazwy pliku.
+*   **Istniejący projekt**: Jeśli pracowałeś już nad plikiem, wybierz go z listy **"Wybierz istniejący projekt"** i kliknij **"Załaduj projekt"**. Następnie wgraj ten sam plik PDF, aby kontynuować pracę.
+
+**Krok 2: Uruchom Przetwarzanie AI**
+*   Gdy plik PDF jest załadowany, kliknij duży, niebieski przycisk **"🚀 Rozpocznij Przetwarzanie"** w panelu bocznym.
+*   AI przeanalizuje każdą stronę dokumentu, próbując zidentyfikować i sformatować artykuły, a także odróżnić je od reklam czy stron tytułowych. Możesz śledzić postęp na pasku postępu.
+
+**Krok 3: Przeglądaj i Edytuj Wyniki**
+*   Po zakończeniu przetwarzania (lub w jego trakcie) możesz nawigować między stronami za pomocą przycisków **"Poprzednia" / "Następna"** lub suwaka.
+*   **Po lewej stronie** widzisz oryginalny wygląd strony z pliku PDF.
+*   **Po prawej stronie** znajduje się tekst przetworzony przez AI.
+*   **Co możesz zrobić na każdej stronie?**
+    *   **🔄 Przetwórz ponownie (z kontekstem)**: Jeśli AI niepoprawnie zinterpretowało tekst (np. ucięło artykuł w połowie), ten przycisk wyśle do AI bieżącą stronę wraz z tekstem ze stron sąsiednich, co często poprawia wynik.
+    *   **✨ SEO: Generuj Meta Tagi**: Dla stron oznaczonych jako "ARTYKUŁ", możesz automatycznie wygenerować propozycje tytułu i opisu meta dla celów SEO.
+    *   **Pobierz obrazy**: Pobierz wszystkie grafiki z bieżącej strony w jednym pliku `.zip`.
+
+**Krok 4: Zapisz i Eksportuj**
+*   **💾 Zapisz postęp**: W dowolnym momencie możesz zapisać aktualny stan swojej pracy.
+*   **📥 Pobierz artykuły**: Gdy będziesz zadowolony z wyników, kliknij ten przycisk, aby pobrać wszystkie przetworzone artykuły w formacie Markdown (`.txt`) spakowane do jednego pliku `.zip`.
+
+Miłej pracy! 🚀
+"""
+
 # --- Konfiguracja strony ---
 st.set_page_config(
     layout="wide",
@@ -458,15 +486,26 @@ def main():
         st.stop()
 
     render_sidebar()
+    
     if not st.session_state.pdf_doc:
-        st.info("👋 Witaj! Aby rozpocząć, wgraj plik PDF lub załaduj istniejący projekt z panelu bocznego."); return
+        st.info("👋 Witaj! Aby rozpocząć, wgraj plik PDF lub załaduj istniejący projekt z panelu bocznego.")
+        
+        with st.expander("📖 Jak korzystać z aplikacji? Kliknij, aby rozwinąć instrukcję"):
+            st.markdown(INSTRUCTIONS_MD, unsafe_allow_html=True)
+        return
+
     render_processing_status()
+    
     if st.session_state.processing_status == 'in_progress' and st.session_state.next_batch_start_index < st.session_state.total_pages:
         asyncio.run(process_batch(st.session_state.next_batch_start_index))
-        st.session_state.next_batch_start_index += BATCH_SIZE; st.rerun()
+        st.session_state.next_batch_start_index += BATCH_SIZE
+        st.rerun()
     elif st.session_state.processing_status == 'in_progress':
-        st.session_state.processing_status = 'complete'; st.rerun()
-    render_navigation(); render_page_content()
+        st.session_state.processing_status = 'complete'
+        st.rerun()
+        
+    render_navigation()
+    render_page_content()
 
 if __name__ == "__main__":
     main()
