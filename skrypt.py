@@ -49,60 +49,15 @@ st.set_page_config(
 # --- Style CSS dla nowoczesnego wyglądu ---
 st.markdown("""
 <style>
-    .stApp { 
-        background-color: #F0F2F5; 
-        font-family: 'Segoe UI', sans-serif; 
-    }
-    .main > div { 
-        background-color: #FFFFFF; 
-        padding: 2rem; 
-        border-radius: 15px; 
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1); 
-    }
-    .stButton>button { 
-        border-radius: 8px; 
-        border: 1px solid #E0E0E0; 
-        color: #333333; 
-        background-color: #FFFFFF; 
-        transition: all 0.2s ease-in-out; 
-        padding: 0.5rem 1rem; 
-    }
-    .stButton>button:hover { 
-        border-color: #007BFF; 
-        color: #007BFF; 
-        box-shadow: 0 2px 5px 0 rgba(0, 123, 255, 0.2); 
-    }
-    .stButton[data-testid="stButton-ProcessAI"] button { 
-        background-color: #007BFF; 
-        color: white; 
-        font-weight: bold; 
-    }
-    .page-text-wrapper { 
-        padding: 1.5rem; 
-        border-radius: 8px; 
-        border: 1px solid #E8E8E8; 
-        background-color: #FAFAFA; 
-        min-height: 500px;
-        max-height: 600px;
-        overflow-y: auto;
-    }
-    .page-text-wrapper h4 { 
-        color: #007BFF; 
-        border-bottom: 2px solid #007BFF; 
-        padding-bottom: 8px; 
-        margin-bottom: 1rem; 
-    }
-    .stMetric {
-        text-align: center;
-    }
-    .error-box {
-        background-color: #f8d7da;
-        border: 1px solid #f5c6cb;
-        color: #721c24;
-        padding: 1rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-    }
+    .stApp { background-color: #F0F2F5; font-family: 'Segoe UI', sans-serif; }
+    .main > div { background-color: #FFFFFF; padding: 2rem; border-radius: 15px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1); }
+    .stButton>button { border-radius: 8px; border: 1px solid #E0E0E0; color: #333333; background-color: #FFFFFF; transition: all 0.2s ease-in-out; padding: 0.5rem 1rem; }
+    .stButton>button:hover { border-color: #007BFF; color: #007BFF; box-shadow: 0 2px 5px 0 rgba(0, 123, 255, 0.2); }
+    .stButton[data-testid="stButton-ProcessAI"] button { background-color: #007BFF; color: white; font-weight: bold; }
+    .page-text-wrapper { padding: 1.5rem; border-radius: 8px; border: 1px solid #E8E8E8; background-color: #FAFAFA; min-height: 500px; max-height: 600px; overflow-y: auto; }
+    .page-text-wrapper h4 { color: #007BFF; border-bottom: 2px solid #007BFF; padding-bottom: 8px; margin-bottom: 1rem; }
+    .stMetric { text-align: center; }
+    .error-box { background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; padding: 1rem; border-radius: 8px; margin: 1rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -114,7 +69,7 @@ def init_session_state():
         'next_batch_start_index': 0, 'uploaded_filename': None,
         'api_key': st.secrets.get("openai", {}).get("api_key"),
         'model': 'gpt-4o-mini', 'meta_tags': {},
-        'project_loaded_and_waiting_for_pdf': False, # Flaga do poprawnego ładowania projektów
+        'project_loaded_and_waiting_for_pdf': False,
         'processing_mode': 'all', 'start_page': 1, 'end_page': 1,
         'processing_end_page_index': 0
     }
@@ -164,7 +119,7 @@ def extract_images_from_page(pdf_doc, page_num):
         st.warning(f"Nie udało się wyekstraktować obrazów ze strony {page_num + 1}: {e}")
     return images
 
-def create_zip_archive(data, file_prefix="item"):
+def create_zip_archive(data):
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for item in data: zf.writestr(item['name'], item['content'])
@@ -188,30 +143,21 @@ def load_project(project_name):
     if not project_file.exists(): st.error(f"Plik projektu '{project_name}' nie istnieje."); return
     try:
         with open(project_file, "r", encoding="utf-8") as f: state_to_load = json.load(f)
-        
-        # Przywróć stan z pliku
         for key, value in state_to_load.items():
             if key != 'pdf_doc': st.session_state[key] = value
-        
-        # Przygotuj listę `extracted_pages` o odpowiedniej długości
         total_pages = st.session_state.get('total_pages', 0)
         st.session_state.extracted_pages = [None] * total_pages
-        
-        # Wypełnij listę załadowanymi danymi
         for page_data in state_to_load.get('extracted_pages', []):
             page_num_one_based = page_data.get('page_number')
             if page_num_one_based and 1 <= page_num_one_based <= total_pages:
                 st.session_state.extracted_pages[page_num_one_based - 1] = page_data
-        
-        # Ustaw flagę i wyczyść dokument, czekając na wgranie przez użytkownika
         st.session_state.pdf_doc = None
         st.session_state.project_loaded_and_waiting_for_pdf = True
         st.success(f"✅ Załadowano projekt '{project_name}'. Wgraj powiązany plik PDF, aby kontynuować.")
-
     except Exception as e:
         st.error(f"Błąd podczas ładowania projektu: {e}")
 
-# --- Funkcje Przetwarzania AI --- (bez zmian, można je zwinąć w edytorze)
+# --- Funkcje Przetwarzania AI (bez zmian) ---
 def markdown_to_html(text):
     text = text.replace('\n---\n', '\n<hr>\n')
     text = re.sub(r'^\s*# (.*?)\s*$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
@@ -280,7 +226,6 @@ async def generate_meta_tags_async(client, article_text, model):
 
 async def process_batch(start_index):
     client = AsyncOpenAI(api_key=st.session_state.api_key)
-    # Przetwarzaj wsad do końca dokumentu lub do końca zdefiniowanego zakresu
     processing_limit = st.session_state.processing_end_page_index + 1
     end_index = min(start_index + BATCH_SIZE, processing_limit)
     tasks = [process_page_async(client, i + 1, st.session_state.pdf_doc.load_page(i).get_text("text"), st.session_state.model) for i in range(start_index, end_index) if st.session_state.pdf_doc]
@@ -305,7 +250,13 @@ def render_sidebar():
         st.divider()
         st.subheader("📄 Plik PDF")
         uploaded_file = st.file_uploader("Wybierz plik PDF", type="pdf")
-        if uploaded_file and uploaded_file.name != st.session_state.uploaded_filename:
+
+        # --- POPRAWIONA LOGIKA OBSŁUGI PLIKU ---
+        # Scenariusz 1: Wgrano plik, a aplikacja czeka na niego po załadowaniu projektu.
+        if uploaded_file and st.session_state.project_loaded_and_waiting_for_pdf:
+            handle_file_upload(uploaded_file)
+        # Scenariusz 2: Wgrano nowy plik (inny niż poprzedni), tworząc nowy projekt.
+        elif uploaded_file and uploaded_file.name != st.session_state.get('uploaded_filename'):
             handle_file_upload(uploaded_file)
         
         if st.session_state.pdf_doc:
@@ -314,12 +265,10 @@ def render_sidebar():
             st.radio("Wybierz tryb:", ('all', 'range'), 
                      captions=["Przetwórz cały dokument", "Przetwórz zakres stron"],
                      key='processing_mode', horizontal=True)
-            
             if st.session_state.processing_mode == 'range':
                 c1, c2 = st.columns(2)
                 c1.number_input("Od strony", min_value=1, max_value=st.session_state.total_pages, key='start_page')
                 c2.number_input("Do strony", min_value=st.session_state.start_page, max_value=st.session_state.total_pages, key='end_page')
-
             st.divider()
             processing_disabled = st.session_state.processing_status == 'in_progress' or not st.session_state.api_key
             button_text = "🔄 Przetwarzanie..." if st.session_state.processing_status == 'in_progress' else "🚀 Rozpocznij Przetwarzanie"
@@ -336,19 +285,15 @@ def handle_file_upload(uploaded_file):
     try:
         with st.spinner("Ładowanie pliku PDF..."):
             pdf_bytes = uploaded_file.read()
-            
-            # SCENARIUSZ 1: Wgrywanie PDF do załadowanego projektu
             if st.session_state.project_loaded_and_waiting_for_pdf:
                 pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
                 if len(pdf_doc) != st.session_state.total_pages:
-                    st.error(f"Błąd: Wgrany plik PDF ma {len(pdf_doc)} stron, a załadowany projekt oczekuje {st.session_state.total_pages} stron. Wgraj właściwy plik.")
+                    st.error(f"Błąd: Wgrany PDF ma {len(pdf_doc)} stron, a projekt oczekuje {st.session_state.total_pages}. Wgraj właściwy plik.")
                     return
                 st.session_state.pdf_doc = pdf_doc
                 st.session_state.uploaded_filename = uploaded_file.name
-                st.session_state.project_loaded_and_waiting_for_pdf = False # Zresetuj flagę
+                st.session_state.project_loaded_and_waiting_for_pdf = False
                 st.success("✅ Plik PDF pomyślnie dopasowany do projektu.")
-            
-            # SCENARIUSZ 2: Tworzenie nowego projektu od zera
             else:
                 pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
                 st.session_state.pdf_doc = pdf_doc
@@ -360,8 +305,7 @@ def handle_file_upload(uploaded_file):
                 st.session_state.processing_status = 'idle'
                 st.session_state.next_batch_start_index = 0
                 st.session_state.meta_tags = {}
-                st.session_state.end_page = len(pdf_doc) # Ustaw domyślną wartość dla number_input
-
+                st.session_state.end_page = len(pdf_doc)
     except Exception as e:
         st.error(f"❌ Błąd ładowania pliku: {e}")
         st.session_state.pdf_doc = None
@@ -369,24 +313,15 @@ def handle_file_upload(uploaded_file):
 
 def start_ai_processing():
     if not st.session_state.api_key:
-        st.error("⚠️ Klucz API OpenAI nie jest skonfigurowany w sekretach.")
-        return
-
-    # Ustal zakres stron do przetworzenia
+        st.error("⚠️ Klucz API OpenAI nie jest skonfigurowany w sekretach."); return
     if st.session_state.processing_mode == 'all':
-        start_idx = 0
-        end_idx = st.session_state.total_pages - 1
-    else: # 'range'
-        start_idx = st.session_state.start_page - 1
-        end_idx = st.session_state.end_page - 1
+        start_idx, end_idx = 0, st.session_state.total_pages - 1
+    else:
+        start_idx, end_idx = st.session_state.start_page - 1, st.session_state.end_page - 1
         if start_idx > end_idx:
-            st.error("Strona początkowa nie może być większa niż końcowa.")
-            return
-
-    # Wyczyść tylko te strony, które będą przetwarzane
+            st.error("Strona początkowa nie może być większa niż końcowa."); return
     for i in range(start_idx, end_idx + 1):
         st.session_state.extracted_pages[i] = None
-    
     st.session_state.processing_status = 'in_progress'
     st.session_state.next_batch_start_index = start_idx
     st.session_state.processing_end_page_index = end_idx
@@ -395,13 +330,11 @@ def render_processing_status():
     if st.session_state.processing_status == 'idle': return
     processed_count = sum(1 for p in st.session_state.extracted_pages if p is not None)
     progress = processed_count / st.session_state.total_pages if st.session_state.total_pages > 0 else 0
-    
     if st.session_state.processing_status == 'complete':
         st.success(f"✅ Przetwarzanie zakończone!")
     else:
         st.info(f"🔄 Przetwarzanie w toku... (Ukończono {processed_count}/{st.session_state.total_pages} stron dokumentu)")
         st.progress(progress)
-    
     c1, c2, _ = st.columns([1, 1, 3])
     if c1.button("💾 Zapisz postęp", use_container_width=True): save_project()
     articles = [p for p in st.session_state.extracted_pages if p and p.get('type') == 'artykuł']
@@ -415,23 +348,18 @@ def render_navigation():
     st.subheader("📖 Nawigacja")
     c1, c2, c3 = st.columns([1, 2, 1])
     if c1.button("⬅️ Poprzednia", use_container_width=True, disabled=(st.session_state.current_page == 0)):
-        st.session_state.current_page -= 1
-        st.rerun()
+        st.session_state.current_page -= 1; st.rerun()
     c2.metric("Strona", f"{st.session_state.current_page + 1} / {st.session_state.total_pages}")
     if c3.button("Następna ➡️", use_container_width=True, disabled=(st.session_state.current_page >= st.session_state.total_pages - 1)):
-        st.session_state.current_page += 1
-        st.rerun()
-    
+        st.session_state.current_page += 1; st.rerun()
     new_page = st.slider("Przejdź do strony:", 1, st.session_state.total_pages, st.session_state.current_page + 1) - 1
     if new_page != st.session_state.current_page:
-        st.session_state.current_page = new_page
-        st.rerun()
+        st.session_state.current_page = new_page; st.rerun()
 
 def render_page_content():
     st.divider()
     pdf_col, text_col = st.columns(2, gap="large")
     page_index = st.session_state.current_page
-
     with pdf_col:
         st.subheader(f"📄 Oryginał (Strona {page_index + 1})")
         image_data = render_page_as_image(st.session_state.pdf_doc, page_index)
@@ -444,13 +372,11 @@ def render_page_content():
                 img_zip = create_zip_archive([{'name': f"str_{page_index+1}_img_{i['index']}.{i['ext']}", 'content': i['image']} for i in images])
                 st.download_button("Pobierz obrazy", img_zip, f"obrazy_strona_{page_index+1}.zip", "application/zip", use_container_width=True)
         else: st.error("Nie można wyświetlić podglądu strony.")
-
     with text_col:
         st.subheader("🤖 Tekst przetworzony przez AI")
         raw_text = st.session_state.pdf_doc.load_page(page_index).get_text("text")
         with st.expander("👁️ Pokaż surowy tekst wejściowy z tej strony"):
             st.text_area("Surowy tekst", raw_text, height=200, disabled=True, key=f"raw_text_{page_index}")
-        
         page_result = st.session_state.extracted_pages[page_index]
         if page_result:
             page_type = page_result.get('type', 'nieznany')
@@ -487,23 +413,19 @@ def render_page_content():
 
 def main():
     st.title("🚀 Redaktor AI - Interaktywny Procesor PDF")
-    
     if not st.session_state.api_key:
         st.error("Brak klucza API OpenAI!")
         st.info("""Proszę skonfiguruj swój klucz API w pliku `.streamlit/secrets.toml`.""")
         st.code("[openai]\napi_key = \"sk-...\"", language="toml")
         st.stop()
-
     render_sidebar()
-    
     if not st.session_state.pdf_doc:
-        st.info("👋 Witaj! Aby rozpocząć, wgraj plik PDF lub załaduj istniejący projekt z panelu bocznego.")
-        with st.expander("📖 Jak korzystać z aplikacji? Kliknij, aby rozwinąć instrukcję"):
-            st.markdown(INSTRUCTIONS_MD, unsafe_allow_html=True)
+        if not st.session_state.project_loaded_and_waiting_for_pdf:
+            st.info("👋 Witaj! Aby rozpocząć, wgraj plik PDF lub załaduj istniejący projekt z panelu bocznego.")
+            with st.expander("📖 Jak korzystać z aplikacji? Kliknij, aby rozwinąć instrukcję"):
+                st.markdown(INSTRUCTIONS_MD, unsafe_allow_html=True)
         return
-
     render_processing_status()
-    
     if st.session_state.processing_status == 'in_progress' and st.session_state.next_batch_start_index <= st.session_state.processing_end_page_index:
         asyncio.run(process_batch(st.session_state.next_batch_start_index))
         st.session_state.next_batch_start_index += BATCH_SIZE
@@ -511,7 +433,6 @@ def main():
     elif st.session_state.processing_status == 'in_progress':
         st.session_state.processing_status = 'complete'
         st.rerun()
-        
     render_navigation()
     render_page_content()
 
