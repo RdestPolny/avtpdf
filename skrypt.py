@@ -19,16 +19,17 @@ INSTRUCTIONS_MD = """
 *   **Istniejący projekt**: Jeśli pracowałeś już nad plikiem, wybierz go z listy **"Wybierz istniejący projekt"** i kliknij **"Załaduj projekt"**. Następnie wgraj ten sam plik PDF, aby kontynuować pracę.
 
 **Krok 2: Uruchom Przetwarzanie AI**
-*   Gdy plik PDF jest załadowany, kliknij duży, niebieski przycisk **"🚀 Rozpocznij Przetwarzanie"** w panelu bocznym.
-*   AI przeanalizuje każdą stronę dokumentu, próbując zidentyfikować i sformatować artykuły, a także odróżnić je od reklam czy stron tytułowych. Możesz śledzić postęp na pasku postępu.
+*   Gdy plik PDF jest załadowany, w panelu bocznym wybierz, czy chcesz przetworzyć **cały dokument**, czy tylko **zakres stron**.
+*   Kliknij duży, niebieski przycisk **"🚀 Rozpocznij Przetwarzanie"**.
+*   AI przeanalizuje wybrane strony, próbując zidentyfikować i sformatować artykuły. Możesz śledzić postęp na pasku postępu.
 
 **Krok 3: Przeglądaj i Edytuj Wyniki**
 *   Po zakończeniu przetwarzania (lub w jego trakcie) możesz nawigować między stronami za pomocą przycisków **"Poprzednia" / "Następna"** lub suwaka.
 *   **Po lewej stronie** widzisz oryginalny wygląd strony z pliku PDF.
 *   **Po prawej stronie** znajduje się tekst przetworzony przez AI.
 *   **Co możesz zrobić na każdej stronie?**
-    *   **🔄 Przetwórz ponownie (z kontekstem)**: Jeśli AI niepoprawnie zinterpretowało tekst (np. ucięło artykuł w połowie), ten przycisk wyśle do AI bieżącą stronę wraz z tekstem ze stron sąsiednich, co często poprawia wynik.
-    *   **✨ SEO: Generuj Meta Tagi**: Dla stron oznaczonych jako "ARTYKUŁ", możesz automatycznie wygenerować propozycje tytułu i opisu meta dla celów SEO.
+    *   **🔄 Przetwórz ponownie (z kontekstem)**: Jeśli AI niepoprawnie zinterpretowało tekst, ten przycisk wyśle do AI bieżącą stronę wraz z tekstem ze stron sąsiednich, co często poprawia wynik.
+    *   **✨ SEO: Generuj Meta Tagi**: Dla stron oznaczonych jako "ARTYKUŁ", możesz automatycznie wygenerować propozycje tytułu i opisu meta.
     *   **Pobierz obrazy**: Pobierz wszystkie grafiki z bieżącej strony w jednym pliku `.zip`.
 
 **Krok 4: Zapisz i Eksportuj**
@@ -112,8 +113,10 @@ def init_session_state():
         'total_pages': 0, 'extracted_pages': [], 'project_name': None,
         'next_batch_start_index': 0, 'uploaded_filename': None,
         'api_key': st.secrets.get("openai", {}).get("api_key"),
-        'model': 'gpt-4o-mini',
-        'meta_tags': {}
+        'model': 'gpt-4o-mini', 'meta_tags': {},
+        'project_loaded_and_waiting_for_pdf': False, # Flaga do poprawnego ładowania projektów
+        'processing_mode': 'all', 'start_page': 1, 'end_page': 1,
+        'processing_end_page_index': 0
     }
     for key, value in defaults.items():
         if key not in st.session_state: st.session_state[key] = value
@@ -171,7 +174,7 @@ def save_project():
     if not st.session_state.project_name or not ensure_projects_dir():
         st.error("Nie można zapisać projektu: brak nazwy projektu."); return
     project_path = PROJECTS_DIR / st.session_state.project_name; project_path.mkdir(exist_ok=True)
-    state_to_save = {k: v for k, v in st.session_state.items() if k not in ['pdf_doc']}
+    state_to_save = {k: v for k, v in st.session_state.items() if k not in ['pdf_doc', 'project_loaded_and_waiting_for_pdf']}
     state_to_save['extracted_pages'] = [p for p in st.session_state.extracted_pages if p is not None]
     try:
         with open(project_path / "project_state.json", "w", encoding="utf-8") as f:
@@ -185,20 +188,30 @@ def load_project(project_name):
     if not project_file.exists(): st.error(f"Plik projektu '{project_name}' nie istnieje."); return
     try:
         with open(project_file, "r", encoding="utf-8") as f: state_to_load = json.load(f)
+        
+        # Przywróć stan z pliku
         for key, value in state_to_load.items():
             if key != 'pdf_doc': st.session_state[key] = value
+        
+        # Przygotuj listę `extracted_pages` o odpowiedniej długości
         total_pages = st.session_state.get('total_pages', 0)
         st.session_state.extracted_pages = [None] * total_pages
+        
+        # Wypełnij listę załadowanymi danymi
         for page_data in state_to_load.get('extracted_pages', []):
             page_num_one_based = page_data.get('page_number')
             if page_num_one_based and 1 <= page_num_one_based <= total_pages:
                 st.session_state.extracted_pages[page_num_one_based - 1] = page_data
-        st.success(f"✅ Załadowano projekt '{project_name}'. Wgraj powiązany plik PDF, aby kontynuować.")
+        
+        # Ustaw flagę i wyczyść dokument, czekając na wgranie przez użytkownika
         st.session_state.pdf_doc = None
+        st.session_state.project_loaded_and_waiting_for_pdf = True
+        st.success(f"✅ Załadowano projekt '{project_name}'. Wgraj powiązany plik PDF, aby kontynuować.")
+
     except Exception as e:
         st.error(f"Błąd podczas ładowania projektu: {e}")
 
-# --- Funkcje Przetwarzania AI ---
+# --- Funkcje Przetwarzania AI --- (bez zmian, można je zwinąć w edytorze)
 def markdown_to_html(text):
     text = text.replace('\n---\n', '\n<hr>\n')
     text = re.sub(r'^\s*# (.*?)\s*$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
@@ -216,61 +229,16 @@ def markdown_to_html(text):
 
 async def process_page_async(client, page_num, raw_text, model):
     page_data = {"page_number": page_num}
-
     if len(raw_text.split()) < 20:
         page_data["type"] = "pominięta"; page_data["formatted_content"] = "<i>Strona zawiera zbyt mało tekstu.</i>"
         return page_data
-
-    prompt = f"""Jesteś precyzyjnym asystentem redakcyjnym. Twoim celem jest przekształcenie surowego tekstu w czytelny, dobrze zorganizowany artykuł internetowy.
-
-ZASADA NADRZĘDNA: WIERNOŚĆ TREŚCI, ELASTYCZNOŚĆ FORMY
-- **Nie zmieniaj oryginalnych sformułowań ani nie parafrazuj tekstu.** Twoim zadaniem jest przenieść treść 1:1.
-- Twoja rola polega na **dodawaniu elementów strukturalnych** (nagłówki, pogrubienia, podział na akapity) w celu poprawy czytelności.
-
-INSTRUKCJE SPECJALNE: Oczyszczanie i Kontekst
-1.  **Ignorowanie Szumu**: Musisz zidentyfikować i całkowicie pominąć w finalnym tekście następujące elementy, jeśli występują na początku lub końcu:
-    - Numery stron (np. "6", "12").
-    - Rozstrzelone daty (np. "c z e r w i e c  2 0 2 5").
-2.  **Wykorzystanie Kategorii**:
-    - Na początku tekstu możesz znaleźć etykietę, np. "od redakcji", "NEWS FLASH", "WYWIAD MIESIĄCA".
-    - Użyj tej etykiety jako **kontekstu** do zrozumienia intencji tekstu, ale **nie umieszczaj jej w sformatowanym artykule**.
-
-DOZWOLONE MODYFIKACJE STRUKTURALNE:
-1.  **Tytuł Główny (`# Tytuł`)**:
-    - **ZNAJDŹ go w tekście**. To często krótka linia bez kropki na końcu.
-2.  **Śródtytuły (`## Śródtytuł`) - Twój kluczowy obowiązek**:
-    - Celem jest przekształcenie 'ściany tekstu' w czytelny artykuł.
-    - Gdy tekst zawiera kilka następujących po sobie akapitów omawiających różne przykłady, technologie lub firmy, **MUSISZ** je rozdzielić trafnymi, zwięzłymi śródtytułami.
-3.  **Pogrubienia (`**tekst**`)**:
-    - Stosuj je, by wyróżnić **kluczowe terminy, nazwy własne i frazy ważne dla SEO**.
-    - W dłuższych akapitach pogrub ważne informacje, aby ułatwić szybkie czytanie.
-4.  **Podział na sekcje**:
-     - Jeśli tekst na stronie wyraźnie zawiera **dwa lub więcej niepowiązanych ze sobą tematów**, oddziel je linią horyzontalną (`---`).
-
-WYMAGANIA KRYTYCZNE:
-- Twoja odpowiedź musi być **WYŁĄCZNIE i BEZWZGLĘDNIE** poprawnym obiektem JSON.
-
-FORMAT ODPOWIEDZI:
-{{"type": "ARTYKUŁ" lub "REKLAMA", "formatted_text": "Sformatowany tekst w markdown. Jeśli jest wiele artykułów, oddziel je '---'."}}
-
-TEKST DO PRZETWORZENIA:
----
-{raw_text}
----
-"""
+    prompt = f"""Jesteś precyzyjnym asystentem redakcyjnym. Twoim celem jest przekształcenie surowego tekstu w czytelny, dobrze zorganizowany artykuł internetowy. ZASADA NADRZĘDNA: WIERNOŚĆ TREŚCI, ELASTYCZNOŚĆ FORMY. - **Nie zmieniaj oryginalnych sformułowań ani nie parafrazuj tekstu.** Twoim zadaniem jest przenieść treść 1:1. - Twoja rola polega na **dodawaniu elementów strukturalnych** (nagłówki, pogrubienia, podział na akapity) w celu poprawy czytelności. INSTRUKCJE SPECJALNE: Oczyszczanie i Kontekst. 1.  **Ignorowanie Szumu**: Musisz zidentyfikować i całkowicie pominąć w finalnym tekście następujące elementy, jeśli występują na początku lub końcu: - Numery stron (np. "6", "12"). - Rozstrzelone daty (np. "c z e r w i e c  2 0 2 5"). 2.  **Wykorzystanie Kategorii**: - Na początku tekstu możesz znaleźć etykietę, np. "od redakcji", "NEWS FLASH", "WYWIAD MIESIĄCA". - Użyj tej etykiety jako **kontekstu** do zrozumienia intencji tekstu, ale **nie umieszczaj jej w sformatowanym artykule**. DOZWOLONE MODYFIKACJE STRUKTURALNE: 1.  **Tytuł Główny (`# Tytuł`)**: - **ZNAJDŹ go w tekście**. To często krótka linia bez kropki na końcu. 2.  **Śródtytuły (`## Śródtytuł`) - Twój kluczowy obowiązek**: - Celem jest przekształcenie 'ściany tekstu' w czytelny artykuł. - Gdy tekst zawiera kilka następujących po sobie akapitów omawiających różne przykłady, technologie lub firmy, **MUSISZ** je rozdzielić trafnymi, zwięzłymi śródtytułami. 3.  **Pogrubienia (`**tekst**`)**: - Stosuj je, by wyróżnić **kluczowe terminy, nazwy własne i frazy ważne dla SEO**. - W dłuższych akapitach pogrub ważne informacje, aby ułatwić szybkie czytanie. 4.  **Podział na sekcje**: - Jeśli tekst na stronie wyraźnie zawiera **dwa lub więcej niepowiązanych ze sobą tematów**, oddziel je linią horyzontalną (`---`). WYMAGANIA KRYTYCZNE: - Twoja odpowiedź musi być **WYŁĄCZNIE i BEZWZGLĘDNIE** poprawnym obiektem JSON. FORMAT ODPOWIEDZI: {{"type": "ARTYKUŁ" lub "REKLAMA", "formatted_text": "Sformatowany tekst w markdown. Jeśli jest wiele artykułów, oddziel je '---'."}} TEKST DO PRZETWORZENIA: --- {raw_text} --- """
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
         content = ""
         try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                temperature=0.1,
-                max_tokens=2048
-            )
+            response = await client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}, temperature=0.1, max_tokens=2048)
             content = response.choices[0].message.content
-
             if not content: raise ValueError("API zwróciło pustą odpowiedź.")
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if not json_match: raise ValueError("W odpowiedzi AI nie znaleziono obiektu JSON.")
@@ -290,36 +258,15 @@ TEKST DO PRZETWORZENIA:
             continue
         except Exception as e:
             last_error = e; break
-    page_data["type"] = "błąd"
-    page_data["formatted_content"] = f"""
-    <div class="error-box"><strong>Błąd parsowania po {MAX_RETRIES + 1} próbach.</strong><br><i>Ostatni błąd: {last_error}</i><br>
-    <details><summary>Pokaż ostatnią surową odpowiedź</summary><pre>{content or "Brak odpowiedzi"}</pre></details></div>"""
-    return page_data
+    page_data["type"] = "błąd"; page_data["formatted_content"] = f"""<div class="error-box"><strong>Błąd parsowania po {MAX_RETRIES + 1} próbach.</strong><br><i>Ostatni błąd: {last_error}</i><br><details><summary>Pokaż ostatnią surową odpowiedź</summary><pre>{content or "Brak odpowiedzi"}</pre></details></div>"""; return page_data
 
 async def generate_meta_tags_async(client, article_text, model):
-    prompt = f"""Jesteś ekspertem SEO. Na podstawie poniższego tekstu artykułu, wygeneruj chwytliwy meta title i zwięzły meta description.
-WYMAGANIA:
-- Meta title: max 60 znaków.
-- Meta description: max 160 znaków.
-- Odpowiedź zwróć jako obiekt JSON.
-FORMAT ODPOWIEDZI:
-{{"meta_title": "Tytuł meta", "meta_description": "Opis meta."}}
-TEKST ARTYKUŁU:
----
-{article_text[:4000]}
----
-"""
+    prompt = f"""Jesteś ekspertem SEO. Na podstawie poniższego tekstu artykułu, wygeneruj chwytliwy meta title i zwięzły meta description. WYMAGANIA: - Meta title: max 60 znaków. - Meta description: max 160 znaków. - Odpowiedź zwróć jako obiekt JSON. FORMAT ODPOWIEDZI: {{"meta_title": "Tytuł meta", "meta_description": "Opis meta."}} TEKST ARTYKUŁU: --- {article_text[:4000]} --- """
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
         content = ""
         try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                temperature=0.5,
-                max_tokens=200
-            )
+            response = await client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}, temperature=0.5, max_tokens=200)
             content = response.choices[0].message.content
             if not content: raise ValueError("API zwróciło pustą odpowiedź.")
             return json.loads(content)
@@ -333,7 +280,9 @@ TEKST ARTYKUŁU:
 
 async def process_batch(start_index):
     client = AsyncOpenAI(api_key=st.session_state.api_key)
-    end_index = min(start_index + BATCH_SIZE, st.session_state.total_pages)
+    # Przetwarzaj wsad do końca dokumentu lub do końca zdefiniowanego zakresu
+    processing_limit = st.session_state.processing_end_page_index + 1
+    end_index = min(start_index + BATCH_SIZE, processing_limit)
     tasks = [process_page_async(client, i + 1, st.session_state.pdf_doc.load_page(i).get_text("text"), st.session_state.model) for i in range(start_index, end_index) if st.session_state.pdf_doc]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for i, result in enumerate(results):
@@ -343,6 +292,7 @@ async def process_batch(start_index):
         else:
             st.session_state.extracted_pages[page_index] = result
 
+# --- Główne funkcje UI ---
 def render_sidebar():
     with st.sidebar:
         st.header("⚙️ Konfiguracja Projektu")
@@ -350,7 +300,8 @@ def render_sidebar():
         projects = get_existing_projects()
         selected_project = st.selectbox("Wybierz istniejący projekt", ["Nowy projekt"] + projects)
         if st.button("Załaduj projekt", disabled=(selected_project == "Nowy projekt")):
-            load_project(selected_project); st.rerun()
+            load_project(selected_project)
+            st.rerun()
         st.divider()
         st.subheader("📄 Plik PDF")
         uploaded_file = st.file_uploader("Wybierz plik PDF", type="pdf")
@@ -359,57 +310,122 @@ def render_sidebar():
         
         if st.session_state.pdf_doc:
             st.divider()
+            st.subheader("🤖 Opcje Przetwarzania")
+            st.radio("Wybierz tryb:", ('all', 'range'), 
+                     captions=["Przetwórz cały dokument", "Przetwórz zakres stron"],
+                     key='processing_mode', horizontal=True)
+            
+            if st.session_state.processing_mode == 'range':
+                c1, c2 = st.columns(2)
+                c1.number_input("Od strony", min_value=1, max_value=st.session_state.total_pages, key='start_page')
+                c2.number_input("Do strony", min_value=st.session_state.start_page, max_value=st.session_state.total_pages, key='end_page')
+
+            st.divider()
             processing_disabled = st.session_state.processing_status == 'in_progress' or not st.session_state.api_key
             button_text = "🔄 Przetwarzanie..." if st.session_state.processing_status == 'in_progress' else "🚀 Rozpocznij Przetwarzanie"
             if st.button(button_text, use_container_width=True, type="primary", disabled=processing_disabled, key="stButton-ProcessAI"):
-                start_ai_processing(); st.rerun()
+                start_ai_processing()
+                st.rerun()
         
         if st.session_state.project_name:
-            st.divider(); st.info(f"**Projekt:** `{st.session_state.project_name}`"); st.metric("Liczba stron", st.session_state.total_pages)
+            st.divider()
+            st.info(f"**Projekt:** `{st.session_state.project_name}`")
+            st.metric("Liczba stron", st.session_state.total_pages)
 
 def handle_file_upload(uploaded_file):
     try:
         with st.spinner("Ładowanie pliku PDF..."):
-            pdf_doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-            st.session_state.pdf_doc = pdf_doc; st.session_state.uploaded_filename = uploaded_file.name
-            st.session_state.project_name = sanitize_filename(Path(uploaded_file.name).stem)
-            st.session_state.total_pages = len(pdf_doc); st.session_state.current_page = 0
-            st.session_state.extracted_pages = [None] * len(pdf_doc); st.session_state.processing_status = 'idle'
-            st.session_state.next_batch_start_index = 0; st.session_state.meta_tags = {}
+            pdf_bytes = uploaded_file.read()
+            
+            # SCENARIUSZ 1: Wgrywanie PDF do załadowanego projektu
+            if st.session_state.project_loaded_and_waiting_for_pdf:
+                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                if len(pdf_doc) != st.session_state.total_pages:
+                    st.error(f"Błąd: Wgrany plik PDF ma {len(pdf_doc)} stron, a załadowany projekt oczekuje {st.session_state.total_pages} stron. Wgraj właściwy plik.")
+                    return
+                st.session_state.pdf_doc = pdf_doc
+                st.session_state.uploaded_filename = uploaded_file.name
+                st.session_state.project_loaded_and_waiting_for_pdf = False # Zresetuj flagę
+                st.success("✅ Plik PDF pomyślnie dopasowany do projektu.")
+            
+            # SCENARIUSZ 2: Tworzenie nowego projektu od zera
+            else:
+                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                st.session_state.pdf_doc = pdf_doc
+                st.session_state.uploaded_filename = uploaded_file.name
+                st.session_state.project_name = sanitize_filename(Path(uploaded_file.name).stem)
+                st.session_state.total_pages = len(pdf_doc)
+                st.session_state.current_page = 0
+                st.session_state.extracted_pages = [None] * len(pdf_doc)
+                st.session_state.processing_status = 'idle'
+                st.session_state.next_batch_start_index = 0
+                st.session_state.meta_tags = {}
+                st.session_state.end_page = len(pdf_doc) # Ustaw domyślną wartość dla number_input
+
     except Exception as e:
-        st.error(f"❌ Błąd ładowania pliku: {e}"); st.session_state.pdf_doc = None
+        st.error(f"❌ Błąd ładowania pliku: {e}")
+        st.session_state.pdf_doc = None
     st.rerun()
 
 def start_ai_processing():
-    if not st.session_state.api_key: st.error("⚠️ Klucz API OpenAI nie jest skonfigurowany w sekretach."); return
-    st.session_state.processing_status = 'in_progress'; st.session_state.next_batch_start_index = 0
-    st.session_state.extracted_pages = [None] * st.session_state.total_pages
+    if not st.session_state.api_key:
+        st.error("⚠️ Klucz API OpenAI nie jest skonfigurowany w sekretach.")
+        return
+
+    # Ustal zakres stron do przetworzenia
+    if st.session_state.processing_mode == 'all':
+        start_idx = 0
+        end_idx = st.session_state.total_pages - 1
+    else: # 'range'
+        start_idx = st.session_state.start_page - 1
+        end_idx = st.session_state.end_page - 1
+        if start_idx > end_idx:
+            st.error("Strona początkowa nie może być większa niż końcowa.")
+            return
+
+    # Wyczyść tylko te strony, które będą przetwarzane
+    for i in range(start_idx, end_idx + 1):
+        st.session_state.extracted_pages[i] = None
+    
+    st.session_state.processing_status = 'in_progress'
+    st.session_state.next_batch_start_index = start_idx
+    st.session_state.processing_end_page_index = end_idx
 
 def render_processing_status():
     if st.session_state.processing_status == 'idle': return
     processed_count = sum(1 for p in st.session_state.extracted_pages if p is not None)
     progress = processed_count / st.session_state.total_pages if st.session_state.total_pages > 0 else 0
     
-    if st.session_state.processing_status == 'complete': st.success(f"✅ Przetwarzanie zakończone!")
-    else: st.info(f"🔄 Przetwarzanie w toku... ({processed_count}/{st.session_state.total_pages})"); st.progress(progress)
+    if st.session_state.processing_status == 'complete':
+        st.success(f"✅ Przetwarzanie zakończone!")
+    else:
+        st.info(f"🔄 Przetwarzanie w toku... (Ukończono {processed_count}/{st.session_state.total_pages} stron dokumentu)")
+        st.progress(progress)
     
     c1, c2, _ = st.columns([1, 1, 3])
     if c1.button("💾 Zapisz postęp", use_container_width=True): save_project()
     articles = [p for p in st.session_state.extracted_pages if p and p.get('type') == 'artykuł']
     if articles:
         zip_data = [{'name': f"strona_{a['page_number']}.txt", 'content': a['raw_markdown'].encode('utf-8')} for a in articles if 'raw_markdown' in a]
-        if zip_data: c2.download_button("📥 Pobierz artykuły", create_zip_archive(zip_data), f"{st.session_state.project_name}_artykuly.zip", "application/zip", use_container_width=True)
+        if zip_data:
+            c2.download_button("📥 Pobierz artykuły", create_zip_archive(zip_data), f"{st.session_state.project_name}_artykuly.zip", "application/zip", use_container_width=True)
 
 def render_navigation():
     if st.session_state.total_pages <= 1: return
     st.subheader("📖 Nawigacja")
     c1, c2, c3 = st.columns([1, 2, 1])
-    if c1.button("⬅️ Poprzednia", use_container_width=True, disabled=(st.session_state.current_page == 0)): st.session_state.current_page -= 1; st.rerun()
+    if c1.button("⬅️ Poprzednia", use_container_width=True, disabled=(st.session_state.current_page == 0)):
+        st.session_state.current_page -= 1
+        st.rerun()
     c2.metric("Strona", f"{st.session_state.current_page + 1} / {st.session_state.total_pages}")
-    if c3.button("Następna ➡️", use_container_width=True, disabled=(st.session_state.current_page >= st.session_state.total_pages - 1)): st.session_state.current_page += 1; st.rerun()
+    if c3.button("Następna ➡️", use_container_width=True, disabled=(st.session_state.current_page >= st.session_state.total_pages - 1)):
+        st.session_state.current_page += 1
+        st.rerun()
     
     new_page = st.slider("Przejdź do strony:", 1, st.session_state.total_pages, st.session_state.current_page + 1) - 1
-    if new_page != st.session_state.current_page: st.session_state.current_page = new_page; st.rerun()
+    if new_page != st.session_state.current_page:
+        st.session_state.current_page = new_page
+        st.rerun()
 
 def render_page_content():
     st.divider()
@@ -431,7 +447,6 @@ def render_page_content():
 
     with text_col:
         st.subheader("🤖 Tekst przetworzony przez AI")
-        
         raw_text = st.session_state.pdf_doc.load_page(page_index).get_text("text")
         with st.expander("👁️ Pokaż surowy tekst wejściowy z tej strony"):
             st.text_area("Surowy tekst", raw_text, height=200, disabled=True, key=f"raw_text_{page_index}")
@@ -475,28 +490,21 @@ def main():
     
     if not st.session_state.api_key:
         st.error("Brak klucza API OpenAI!")
-        st.info("""
-            Proszę skonfiguruj swój klucz API w pliku `.streamlit/secrets.toml`.
-            Plik powinien zawierać:
-            ```toml
-            [openai]
-            api_key = "sk-..."
-            ```
-        """)
+        st.info("""Proszę skonfiguruj swój klucz API w pliku `.streamlit/secrets.toml`.""")
+        st.code("[openai]\napi_key = \"sk-...\"", language="toml")
         st.stop()
 
     render_sidebar()
     
     if not st.session_state.pdf_doc:
         st.info("👋 Witaj! Aby rozpocząć, wgraj plik PDF lub załaduj istniejący projekt z panelu bocznego.")
-        
         with st.expander("📖 Jak korzystać z aplikacji? Kliknij, aby rozwinąć instrukcję"):
             st.markdown(INSTRUCTIONS_MD, unsafe_allow_html=True)
         return
 
     render_processing_status()
     
-    if st.session_state.processing_status == 'in_progress' and st.session_state.next_batch_start_index < st.session_state.total_pages:
+    if st.session_state.processing_status == 'in_progress' and st.session_state.next_batch_start_index <= st.session_state.processing_end_page_index:
         asyncio.run(process_batch(st.session_state.next_batch_start_index))
         st.session_state.next_batch_start_index += BATCH_SIZE
         st.rerun()
