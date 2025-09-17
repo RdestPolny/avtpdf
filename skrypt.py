@@ -71,7 +71,9 @@ def init_session_state():
         'model': 'gpt-4o-mini', 'meta_tags': {},
         'project_loaded_and_waiting_for_pdf': False,
         'processing_mode': 'all', 'start_page': 1, 'end_page': 1,
-        'processing_end_page_index': 0
+        'processing_end_page_index': 0,
+        'article_page_groups_input': '', 'article_groups': [],
+        'next_article_index': 0
     }
     for key, value in defaults.items():
         if key not in st.session_state: st.session_state[key] = value
@@ -124,6 +126,48 @@ def create_zip_archive(data):
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for item in data: zf.writestr(item['name'], item['content'])
     return zip_buffer.getvalue()
+
+def parse_page_groups(input_text, total_pages):
+    if not input_text:
+        raise ValueError("Nie podano zakresów stron.")
+    groups = []
+    used_pages = set()
+    for line in re.split(r'[;\n]+', input_text):
+        line = line.strip()
+        if not line:
+            continue
+        pages = []
+        for part in re.split(r'[;,]+', line):
+            part = part.strip()
+            if not part:
+                continue
+            if '-' in part:
+                start_str, end_str = part.split('-', 1)
+                if not start_str.isdigit() or not end_str.isdigit():
+                    raise ValueError(f"Niepoprawny zakres stron: '{part}'.")
+                start, end = int(start_str), int(end_str)
+                if start > end:
+                    raise ValueError(f"Zakres stron musi być rosnący: '{part}'.")
+                if start < 1 or end > total_pages:
+                    raise ValueError(f"Zakres '{part}' wykracza poza liczbę stron dokumentu.")
+                pages.extend(range(start, end + 1))
+            else:
+                if not part.isdigit():
+                    raise ValueError(f"Niepoprawny numer strony: '{part}'.")
+                page = int(part)
+                if page < 1 or page > total_pages:
+                    raise ValueError(f"Strona '{page}' wykracza poza dokument.")
+                pages.append(page)
+        if not pages:
+            continue
+        pages = sorted(dict.fromkeys(pages))
+        if any(p in used_pages for p in pages):
+            raise ValueError(f"Strony {pages} zostały już przypisane do innego artykułu.")
+        used_pages.update(pages)
+        groups.append(pages)
+    if not groups:
+        raise ValueError("Nie znaleziono żadnych poprawnych zakresów stron.")
+    return groups
 
 def save_project():
     if not st.session_state.project_name or not ensure_projects_dir():
@@ -206,6 +250,49 @@ async def process_page_async(client, page_num, raw_text, model):
             last_error = e; break
     page_data["type"] = "błąd"; page_data["formatted_content"] = f"""<div class="error-box"><strong>Błąd parsowania po {MAX_RETRIES + 1} próbach.</strong><br><i>Ostatni błąd: {last_error}</i><br><details><summary>Pokaż ostatnią surową odpowiedź</summary><pre>{content or "Brak odpowiedzi"}</pre></details></div>"""; return page_data
 
+async def process_article_group_async(client, page_numbers, raw_text, model):
+    prompt = f"""Jesteś precyzyjnym asystentem redakcyjnym. Poniżej otrzymujesz surowy tekst artykułu rozłożonego na kilka stron. Twoim zadaniem jest przygotowanie spójnego, kompletnego artykułu w formacie markdown zgodnie z zasadami: ZASADA NADRZĘDNA: WIERNOŚĆ TREŚCI, ELASTYCZNOŚĆ FORMY. - **Nie zmieniaj oryginalnych sformułowań ani nie parafrazuj tekstu.** Twoim zadaniem jest przenieść treść 1:1. - Twoja rola polega na **dodawaniu elementów strukturalnych** (nagłówki, pogrubienia, podział na akapity) w celu poprawy czytelności. INSTRUKCJE SPECJALNE: Oczyszczanie i Kontekst. 1.  **Ignorowanie Szumu**: Musisz zidentyfikować i całkowicie pominąć w finalnym tekście następujące elementy, jeśli występują na początku lub końcu: - Numery stron. - Rozstrzelone daty. 2.  **Wykorzystanie Kategorii**: - Na początku tekstu możesz znaleźć etykietę, np. "od redakcji", "NEWS FLASH", "WYWIAD MIESIĄCA". - Użyj tej etykiety jako **kontekstu** do zrozumienia intencji tekstu, ale **nie umieszczaj jej w sformatowanym artykule**. DOZWOLONE MODYFIKACJE STRUKTURALNE: 1.  **Tytuł Główny (`# Tytuł`)**: - **ZNAJDŹ go w tekście**. To często krótka linia bez kropki na końcu. 2.  **Śródtytuły (`## Śródtytuł`)**: - Rozbij długie sekcje na logiczne części. 3.  **Pogrubienia (`**tekst**`)**: - Wyróżnij kluczowe informacje. 4.  **Podział na sekcje**: - Jeśli tekst zawiera różne tematy, oddziel je linią horyzontalną (`---`). WYMAGANIA KRYTYCZNE: - Odpowiedź musi być **WYŁĄCZNIE** poprawnym obiektem JSON w formacie: {{"type": "ARTYKUŁ" lub "REKLAMA", "formatted_text": "Sformatowany tekst w markdown."}}. TEKST DO PRZETWORZENIA: --- {raw_text} ---"""
+    last_error = None
+    content = ""
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=4096
+            )
+            content = response.choices[0].message.content or ""
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if not json_match:
+                raise ValueError("W odpowiedzi AI nie znaleziono obiektu JSON.")
+            ai_result = json.loads(json_match.group(0))
+            article_data = {
+                "page_numbers": page_numbers,
+                "type": ai_result.get("type", "nieznany").lower()
+            }
+            formatted_text = ai_result.get("formatted_text", "")
+            if article_data["type"] == "artykuł":
+                article_data["formatted_content"] = markdown_to_html(formatted_text)
+                article_data["raw_markdown"] = formatted_text
+            else:
+                article_data["formatted_content"] = f"<i>Zidentyfikowano jako: <strong>{article_data['type'].upper()}</strong>.</i>"
+            return article_data
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(1)
+            continue
+        except Exception as e:
+            last_error = e
+            break
+    return {
+        "page_numbers": page_numbers,
+        "type": "błąd",
+        "formatted_content": f"""<div class='error-box'><strong>Błąd parsowania po {MAX_RETRIES + 1} próbach.</strong><br><i>Ostatni błąd: {last_error}</i><br><details><summary>Pokaż ostatnią surową odpowiedź</summary><pre>{content or "Brak odpowiedzi"}</pre></details></div>"""
+    }
+
 async def generate_meta_tags_async(client, article_text, model):
     prompt = f"""Jesteś ekspertem SEO. Na podstawie poniższego tekstu artykułu, wygeneruj chwytliwy meta title i zwięzły meta description. WYMAGANIA: - Meta title: max 60 znaków. - Meta description: max 160 znaków. - Odpowiedź zwróć jako obiekt JSON. FORMAT ODPOWIEDZI: {{"meta_title": "Tytuł meta", "meta_description": "Opis meta."}} TEKST ARTYKUŁU: --- {article_text[:4000]} --- """
     last_error = None
@@ -262,13 +349,16 @@ def render_sidebar():
         if st.session_state.pdf_doc:
             st.divider()
             st.subheader("🤖 Opcje Przetwarzania")
-            st.radio("Wybierz tryb:", ('all', 'range'), 
-                     captions=["Przetwórz cały dokument", "Przetwórz zakres stron"],
+            st.radio("Wybierz tryb:", ('all', 'range', 'article'),
+                     captions=["Przetwórz cały dokument", "Przetwórz zakres stron", "Przetwórz wielostronicowy artykuł"],
                      key='processing_mode', horizontal=True)
             if st.session_state.processing_mode == 'range':
                 c1, c2 = st.columns(2)
                 c1.number_input("Od strony", min_value=1, max_value=st.session_state.total_pages, key='start_page')
                 c2.number_input("Do strony", min_value=st.session_state.start_page, max_value=st.session_state.total_pages, key='end_page')
+            elif st.session_state.processing_mode == 'article':
+                st.info("Podaj grupy stron należących do jednego artykułu. Każdą grupę oddziel średnikiem lub nową linią, np. `1-3; 5,6`.")
+                st.text_area("Zakresy stron artykułów", key='article_page_groups_input', placeholder="1-3\n5,6")
             st.divider()
             processing_disabled = st.session_state.processing_status == 'in_progress' or not st.session_state.api_key
             button_text = "🔄 Przetwarzanie..." if st.session_state.processing_status == 'in_progress' else "🚀 Rozpocznij Przetwarzanie"
@@ -314,17 +404,42 @@ def handle_file_upload(uploaded_file):
 def start_ai_processing():
     if not st.session_state.api_key:
         st.error("⚠️ Klucz API OpenAI nie jest skonfigurowany w sekretach."); return
-    if st.session_state.processing_mode == 'all':
-        start_idx, end_idx = 0, st.session_state.total_pages - 1
+    if st.session_state.processing_mode == 'article':
+        try:
+            groups = parse_page_groups(st.session_state.article_page_groups_input, st.session_state.total_pages)
+        except ValueError as e:
+            st.error(str(e))
+            return
+        for group in groups:
+            for page in group:
+                st.session_state.extracted_pages[page - 1] = None
+        st.session_state.article_groups = groups
+        st.session_state.next_article_index = 0
+        st.session_state.processing_status = 'in_progress'
     else:
-        start_idx, end_idx = st.session_state.start_page - 1, st.session_state.end_page - 1
-        if start_idx > end_idx:
-            st.error("Strona początkowa nie może być większa niż końcowa."); return
-    for i in range(start_idx, end_idx + 1):
-        st.session_state.extracted_pages[i] = None
-    st.session_state.processing_status = 'in_progress'
-    st.session_state.next_batch_start_index = start_idx
-    st.session_state.processing_end_page_index = end_idx
+        if st.session_state.processing_mode == 'all':
+            start_idx, end_idx = 0, st.session_state.total_pages - 1
+        else:
+            start_idx, end_idx = st.session_state.start_page - 1, st.session_state.end_page - 1
+            if start_idx > end_idx:
+                st.error("Strona początkowa nie może być większa niż końcowa."); return
+        for i in range(start_idx, end_idx + 1):
+            st.session_state.extracted_pages[i] = None
+        st.session_state.processing_status = 'in_progress'
+        st.session_state.next_batch_start_index = start_idx
+        st.session_state.processing_end_page_index = end_idx
+
+def assign_article_result_to_pages(article_result):
+    for page in article_result.get('page_numbers', []):
+        page_index = page - 1
+        if 0 <= page_index < len(st.session_state.extracted_pages):
+            entry = {
+                key: value for key, value in article_result.items() if key != 'page_numbers'
+            }
+            entry['page_number'] = page
+            entry['group_pages'] = article_result.get('page_numbers', [])
+            entry['is_group_lead'] = (page == article_result.get('page_numbers', [page])[0])
+            st.session_state.extracted_pages[page_index] = entry
 
 def render_processing_status():
     if st.session_state.processing_status == 'idle': return
@@ -337,7 +452,7 @@ def render_processing_status():
         st.progress(progress)
     c1, c2, _ = st.columns([1, 1, 3])
     if c1.button("💾 Zapisz postęp", use_container_width=True): save_project()
-    articles = [p for p in st.session_state.extracted_pages if p and p.get('type') == 'artykuł']
+    articles = [p for p in st.session_state.extracted_pages if p and p.get('type') == 'artykuł' and p.get('is_group_lead', True)]
     if articles:
         zip_data = [{'name': f"strona_{a['page_number']}.txt", 'content': a['raw_markdown'].encode('utf-8')} for a in articles if 'raw_markdown' in a]
         if zip_data:
@@ -382,6 +497,9 @@ def render_page_content():
             page_type = page_result.get('type', 'nieznany')
             color = {"artykuł": "green", "reklama": "orange", "pominięta": "grey"}.get(page_type, "red")
             st.markdown(f"**Status:** <span style='color:{color}; text-transform:uppercase;'>**{page_type}**</span>", unsafe_allow_html=True)
+            group_pages = page_result.get('group_pages', [])
+            if group_pages and len(group_pages) > 1:
+                st.info(f"Ten artykuł obejmuje strony: {', '.join(str(p) for p in group_pages)}.")
             st.markdown(f"<div class='page-text-wrapper'>{page_result.get('formatted_content', '')}</div>", unsafe_allow_html=True)
             action_cols = st.columns(2)
             if action_cols[0].button("🔄 Przetwórz ponownie (z kontekstem)", key=f"reroll_{page_index}", use_container_width=True):
@@ -394,13 +512,16 @@ def render_page_content():
                     new_result = asyncio.run(process_page_async(client, page_index + 1, context_text, st.session_state.model))
                     st.session_state.extracted_pages[page_index] = new_result
                 st.rerun()
-            if page_type == 'artykuł' and 'raw_markdown' in page_result:
+            allow_meta = page_type == 'artykuł' and 'raw_markdown' in page_result and page_result.get('is_group_lead', True)
+            if allow_meta:
                  if action_cols[1].button("✨ SEO: Generuj Meta Tagi", key=f"meta_{page_index}", use_container_width=True):
                     with st.spinner("Generowanie meta tagów..."):
                         client = AsyncOpenAI(api_key=st.session_state.api_key)
                         tags = asyncio.run(generate_meta_tags_async(client, page_result['raw_markdown'], st.session_state.model))
                         st.session_state.meta_tags[page_index] = tags
                     st.rerun()
+            elif page_type == 'artykuł':
+                action_cols[1].button("✨ SEO: Generuj Meta Tagi", key=f"meta_{page_index}", use_container_width=True, disabled=True)
             if page_index in st.session_state.meta_tags:
                 tags = st.session_state.meta_tags[page_index]
                 if "error" in tags: st.error(f"Błąd generowania meta tagów: {tags['error']}")
@@ -426,13 +547,32 @@ def main():
                 st.markdown(INSTRUCTIONS_MD, unsafe_allow_html=True)
         return
     render_processing_status()
-    if st.session_state.processing_status == 'in_progress' and st.session_state.next_batch_start_index <= st.session_state.processing_end_page_index:
-        asyncio.run(process_batch(st.session_state.next_batch_start_index))
-        st.session_state.next_batch_start_index += BATCH_SIZE
-        st.rerun()
-    elif st.session_state.processing_status == 'in_progress':
-        st.session_state.processing_status = 'complete'
-        st.rerun()
+    if st.session_state.processing_status == 'in_progress':
+        if st.session_state.processing_mode == 'article':
+            if st.session_state.next_article_index < len(st.session_state.article_groups):
+                article_pages = st.session_state.article_groups[st.session_state.next_article_index]
+                client = AsyncOpenAI(api_key=st.session_state.api_key)
+                combined_text = []
+                for page in article_pages:
+                    page_index = page - 1
+                    if st.session_state.pdf_doc and 0 <= page_index < st.session_state.total_pages:
+                        page_text = st.session_state.pdf_doc.load_page(page_index).get_text("text")
+                        combined_text.append(f"--- STRONA {page} ---\n{page_text.strip()}\n")
+                article_result = asyncio.run(process_article_group_async(client, article_pages, "\n".join(combined_text), st.session_state.model))
+                assign_article_result_to_pages(article_result)
+                st.session_state.next_article_index += 1
+                st.rerun()
+            else:
+                st.session_state.processing_status = 'complete'
+                st.rerun()
+        else:
+            if st.session_state.next_batch_start_index <= st.session_state.processing_end_page_index:
+                asyncio.run(process_batch(st.session_state.next_batch_start_index))
+                st.session_state.next_batch_start_index += BATCH_SIZE
+                st.rerun()
+            else:
+                st.session_state.processing_status = 'complete'
+                st.rerun()
     render_navigation()
     render_page_content()
 
