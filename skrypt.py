@@ -230,9 +230,13 @@ async def process_page_async(client, page_num, raw_text, model):
             response = await client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}, temperature=0.1, max_tokens=2048)
             content = response.choices[0].message.content
             if not content: raise ValueError("API zwróciło pustą odpowiedź.")
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if not json_match: raise ValueError("W odpowiedzi AI nie znaleziono obiektu JSON.")
-            clean_content = json_match.group(0)
+            clean_content = content.strip()
+            if clean_content.startswith("```json"):
+                clean_content = clean_content[len("```json"):].strip()
+            if clean_content.startswith("```"):
+                clean_content = clean_content[len("```"):].strip()
+            if clean_content.endswith("```"):
+                clean_content = clean_content[:-3].strip()
             ai_result = json.loads(clean_content)
             page_data["type"] = ai_result.get("type", "nieznany").lower()
             formatted_text = ai_result.get("formatted_text", "")
@@ -264,10 +268,14 @@ async def process_article_group_async(client, page_numbers, raw_text, model):
                 max_tokens=4096
             )
             content = response.choices[0].message.content or ""
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if not json_match:
-                raise ValueError("W odpowiedzi AI nie znaleziono obiektu JSON.")
-            ai_result = json.loads(json_match.group(0))
+            clean_content = content.strip()
+            if clean_content.startswith("```json"):
+                clean_content = clean_content[len("```json"):].strip()
+            if clean_content.startswith("```"):
+                clean_content = clean_content[len("```"):].strip()
+            if clean_content.endswith("```"):
+                clean_content = clean_content[:-3].strip()
+            ai_result = json.loads(clean_content)
             article_data = {
                 "page_numbers": page_numbers,
                 "type": ai_result.get("type", "nieznany").lower()
