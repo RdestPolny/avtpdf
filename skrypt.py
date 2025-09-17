@@ -101,7 +101,6 @@ st.markdown("""
 
 def init_session_state():
     """Inicjalizuje stan sesji z wartościami domyślnymi."""
-    # Pobranie klucza API z sekretów Streamlit
     SESSION_STATE_DEFAULTS['api_key'] = st.secrets.get("openai", {}).get("api_key")
     for key, value in SESSION_STATE_DEFAULTS.items():
         if key not in st.session_state:
@@ -117,14 +116,11 @@ def get_openai_client():
     return AsyncOpenAI(api_key=st.session_state.api_key)
 
 def get_page_processing_prompt(raw_text):
-    """Zwraca prompt do przetwarzania pojedynczej strony."""
     return f"""
 Jesteś precyzyjnym asystentem redakcyjnym. Twoim celem jest przekształcenie surowego tekstu w czytelny, dobrze zorganizowany artykuł internetowy.
-
 ZASADA NADRZĘDNA: WIERNOŚĆ TREŚCI, ELASTYCZNOŚĆ FORMY.
 - **Nie zmieniaj oryginalnych sformułowań ani nie parafrazuj tekstu.** Twoim zadaniem jest przenieść treść 1:1.
 - Twoja rola polega na **dodawaniu elementów strukturalnych** (nagłówki, pogrubienia, podział na akapity) w celu poprawy czytelności.
-
 INSTRUKCJE SPECJALNE: Oczyszczanie i Kontekst.
 1. **Ignorowanie Szumu**: Musisz zidentyfikować i całkowicie pominąć w finalnym tekście następujące elementy, jeśli występują na początku lub końcu:
    - Numery stron (np. "6", "12").
@@ -132,7 +128,6 @@ INSTRUKCJE SPECJALNE: Oczyszczanie i Kontekst.
 2. **Wykorzystanie Kategorii**:
    - Na początku tekstu możesz znaleźć etykietę, np. "od redakcji", "NEWS FLASH", "WYWIAD MIESIĄCA".
    - Użyj tej etykiety jako **kontekstu** do zrozumienia intencji tekstu, ale **nie umieszczaj jej w sformatowanym artykule**.
-
 DOZWOLONE MODYFIKACJE STRUKTURALNE:
 1. **Tytuł Główny (# Tytuł)**:
    - **ZNAJDŹ go w tekście**. To często krótka linia bez kropki na końcu.
@@ -144,13 +139,9 @@ DOZWOLONE MODYFIKACJE STRUKTURALNE:
    - W dłuższych akapitach pogrub ważne informacje, aby ułatwić szybkie czytanie.
 4. **Podział na sekcje**:
    - Jeśli tekst na stronie wyraźnie zawiera **dwa lub więcej niepowiązanych ze sobą tematów**, oddziel je linią horyzontalną (---).
-
 WYMAGANIA KRYTYCZNE:
 - Twoja odpowiedź musi być **WYŁĄCZNIE i BEZWZGLĘDNIE** poprawnym obiektem JSON.
-
-FORMAT ODPOWIEDZI:
-{{"type": "ARTYKUŁ" lub "REKLAMA", "formatted_text": "Sformatowany tekst w markdown. Jeśli jest wiele artykułów, oddziel je '---'."}}
-
+FORMAT ODPOWIEDZI: {{"type": "ARTYKUŁ" lub "REKLAMA", "formatted_text": "Sformatowany tekst w markdown. Jeśli jest wiele artykułów, oddziel je '---'."}}
 TEKST DO PRZETWORZENIA:
 ---
 {raw_text}
@@ -158,14 +149,11 @@ TEKST DO PRZETWORZENIA:
 """
 
 def get_article_group_processing_prompt(raw_text):
-    """Zwraca prompt do przetwarzania połączonego tekstu z wielu stron jako jeden artykuł."""
     return f"""
 Jesteś precyzyjnym asystentem redakcyjnym. Poniżej otrzymujesz surowy tekst artykułu rozłożonego na kilka stron. Twoim zadaniem jest przygotowanie spójnego, kompletnego artykułu w formacie markdown zgodnie z zasadami:
-
 ZASADA NADRZĘDNA: WIERNOŚĆ TREŚCI, ELASTYCZNOŚĆ FORMY.
 - **Nie zmieniaj oryginalnych sformułowań ani nie parafrazuj tekstu.** Twoim zadaniem jest przenieść treść 1:1.
 - Twoja rola polega na **dodawaniu elementów strukturalnych** (nagłówki, pogrubienia, podział na akapity) w celu poprawy czytelności.
-
 INSTRUKCJE SPECJALNE: Oczyszczanie i Kontekst.
 1.  **Ignorowanie Szumu**: Musisz zidentyfikować i całkowicie pominąć w finalnym tekście następujące elementy, jeśli występują na początku lub końcu:
     - Numery stron.
@@ -173,7 +161,6 @@ INSTRUKCJE SPECJALNE: Oczyszczanie i Kontekst.
 2.  **Wykorzystanie Kategorii**:
     - Na początku tekstu możesz znaleźć etykietę, np. "od redakcji", "NEWS FLASH", "WYWIAD MIESIĄCA".
     - Użyj tej etykiety jako **kontekstu** do zrozumienia intencji tekstu, ale **nie umieszczaj jej w sformatowanym artykule**.
-
 DOZWOLONE MODYFIKACJE STRUKTURALNE:
 1.  **Tytuł Główny (`# Tytuł`)**:
     - **ZNAJDŹ go w tekście**. To często krótka linia bez kropki na końcu.
@@ -183,10 +170,8 @@ DOZWOLONE MODYFIKACJE STRUKTURALNE:
     - Wyróżnij kluczowe informacje.
 4.  **Podział na sekcje**:
     - Jeśli tekst zawiera różne tematy, oddziel je linią horyzontalną (`---`).
-
 WYMAGANIA KRYTYCZNE:
 - Odpowiedź musi być **WYŁĄCZNIE** poprawnym obiektem JSON w formacie: {{"type": "ARTYKUŁ" lub "REKLAMA", "formatted_text": "Sformatowany tekst w markdown."}}.
-
 TEKST DO PRZETWORZENIA:
 ---
 {raw_text}
@@ -194,18 +179,14 @@ TEKST DO PRZETWORZENIA:
 """
 
 def get_meta_tags_prompt(article_text):
-    """Zwraca prompt do generowania meta tagów SEO."""
     return f"""
 Jesteś ekspertem SEO. Na podstawie poniższego tekstu artykułu, wygeneruj chwytliwy meta title i zwięzły meta description.
-
 WYMAGANIA:
 - Meta title: max 60 znaków.
 - Meta description: max 160 znaków.
 - Odpowiedź zwróć jako obiekt JSON.
-
 FORMAT ODPOWIEDZI:
 {{"meta_title": "Tytuł meta", "meta_description": "Opis meta."}}
-
 TEKST ARTYKUŁU:
 ---
 {article_text[:4000]}
@@ -213,7 +194,6 @@ TEKST ARTYKUŁU:
 """
 
 async def _call_openai_api(client, prompt, model, max_tokens, temperature=0.1):
-    """Prywatna funkcja pomocnicza do obsługi wywołań API OpenAI z logiką ponawiania."""
     last_error = None
     content = ""
     for attempt in range(MAX_RETRIES + 1):
@@ -229,7 +209,6 @@ async def _call_openai_api(client, prompt, model, max_tokens, temperature=0.1):
             if not content:
                 raise ValueError("API zwróciło pustą odpowiedź.")
             
-            # Prosta normalizacja odpowiedzi JSON - usuwanie ewentualnych znaczników kodu
             clean_content = content.strip()
             if clean_content.startswith("```json"):
                 clean_content = clean_content[len("```json"):].strip()
@@ -244,7 +223,6 @@ async def _call_openai_api(client, prompt, model, max_tokens, temperature=0.1):
         except Exception as e:
             last_error = e
             break
-    # Zwraca błąd, jeśli wszystkie próby zawiodły
     return {
         "error": f"Błąd parsowania po {MAX_RETRIES + 1} próbach.",
         "last_known_error": str(last_error),
@@ -252,7 +230,6 @@ async def _call_openai_api(client, prompt, model, max_tokens, temperature=0.1):
     }
 
 async def process_page_async(client, page_num, raw_text, model):
-    """Przetwarza tekst z pojedynczej strony, zwracając ustrukturyzowane dane."""
     page_data = {"page_number": page_num}
     if len(raw_text.split()) < 20:
         page_data["type"] = "pominięta"
@@ -278,7 +255,6 @@ async def process_page_async(client, page_num, raw_text, model):
     return page_data
 
 async def process_article_group_async(client, page_numbers, raw_text, model):
-    """Przetwarza połączony tekst z wielu stron jako jeden artykuł."""
     prompt = get_article_group_processing_prompt(raw_text)
     ai_result = await _call_openai_api(client, prompt, model, 4096)
     
@@ -299,12 +275,10 @@ async def process_article_group_async(client, page_numbers, raw_text, model):
     return article_data
 
 async def generate_meta_tags_async(client, article_text, model):
-    """Generuje meta tagi dla podanego tekstu artykułu."""
     prompt = get_meta_tags_prompt(article_text)
     return await _call_openai_api(client, prompt, model, 200, temperature=0.5)
 
 async def process_batch(client, start_index):
-    """Przetwarza partię stron PDF asynchronicznie."""
     processing_limit = st.session_state.processing_end_page_index + 1
     end_index = min(start_index + BATCH_SIZE, processing_limit)
     tasks = [
@@ -323,7 +297,6 @@ async def process_batch(client, start_index):
 # --- FUNKCJE OBSŁUGI PROJEKTU I PLIKÓW ---
 
 def ensure_projects_dir():
-    """Upewnia się, że katalog projektów istnieje."""
     try:
         PROJECTS_DIR.mkdir(exist_ok=True)
         return True
@@ -332,20 +305,17 @@ def ensure_projects_dir():
         return False
 
 def get_existing_projects():
-    """Zwraca listę istniejących projektów."""
     if not ensure_projects_dir():
         return []
     return [d.name for d in PROJECTS_DIR.iterdir() if d.is_dir()]
 
 def save_project():
-    """Zapisuje bieżący stan projektu do pliku JSON."""
     if not st.session_state.project_name or not ensure_projects_dir():
         st.error("Nie można zapisać projektu: brak nazwy projektu.")
         return
     project_path = PROJECTS_DIR / st.session_state.project_name
     project_path.mkdir(exist_ok=True)
     
-    # Kopiowanie stanu sesji z wykluczeniem obiektów, których nie da się serializować
     state_to_save = {k: v for k, v in st.session_state.items() if k not in ['pdf_doc', 'project_loaded_and_waiting_for_pdf']}
     state_to_save['extracted_pages'] = [p for p in st.session_state.extracted_pages if p is not None]
 
@@ -357,7 +327,6 @@ def save_project():
         st.error(f"Błąd podczas zapisywania projektu: {e}")
 
 def load_project(project_name):
-    """Ładuje stan projektu z pliku JSON."""
     project_file = PROJECTS_DIR / project_name / "project_state.json"
     if not project_file.exists():
         st.error(f"Plik projektu '{project_name}' nie istnieje.")
@@ -370,7 +339,6 @@ def load_project(project_name):
             if key != 'pdf_doc':
                 st.session_state[key] = value
         
-        # Przywrócenie struktury `extracted_pages` z `None` dla brakujących stron
         total_pages = st.session_state.get('total_pages', 0)
         st.session_state.extracted_pages = [None] * total_pages
         for page_data in state_to_load.get('extracted_pages', []):
@@ -385,14 +353,12 @@ def load_project(project_name):
         st.error(f"Błąd podczas ładowania projektu: {e}")
 
 def handle_file_upload(uploaded_file):
-    """Przetwarza wgrany plik PDF i aktualizuje stan sesji."""
     try:
         with st.spinner("Ładowanie pliku PDF..."):
             pdf_bytes = uploaded_file.read()
             pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
             if st.session_state.project_loaded_and_waiting_for_pdf:
-                # Scenariusz: Projekt został załadowany, teraz dopasowujemy PDF
                 if len(pdf_doc) != st.session_state.total_pages:
                     st.error(f"Błąd: Wgrany PDF ma {len(pdf_doc)} stron, a projekt oczekuje {st.session_state.total_pages}. Wgraj właściwy plik.")
                     return
@@ -401,9 +367,7 @@ def handle_file_upload(uploaded_file):
                 st.session_state.project_loaded_and_waiting_for_pdf = False
                 st.success("✅ Plik PDF pomyślnie dopasowany do projektu.")
             else:
-                # Scenariusz: Nowy projekt oparty na wgranym pliku PDF
-                for key, value in SESSION_STATE_DEFAULTS.items(): # Reset do stanu początkowego
-                    st.session_state[key] = value
+                init_session_state() # Reset do stanu początkowego
                 
                 st.session_state.pdf_doc = pdf_doc
                 st.session_state.uploaded_filename = uploaded_file.name
@@ -419,13 +383,11 @@ def handle_file_upload(uploaded_file):
 # --- FUNKCJE POMOCNICZE ---
 
 def sanitize_filename(name):
-    """Usuwa niedozwolone znaki z nazwy pliku."""
     if not name: return "unnamed_project"
     sanitized = re.sub(r'[\\/*?:"<>|]', "_", str(name))
     return re.sub(r'_{2,}', "_", sanitized).strip("_") or "unnamed_project"
 
 def markdown_to_html(text):
-    """Konwertuje podstawowy Markdown na HTML dla celów wyświetlania."""
     text = text.replace('\n---\n', '\n<hr>\n')
     text = re.sub(r'^\s*# (.*?)\s*$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
     text = re.sub(r'^\s*## (.*?)\s*$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
@@ -439,7 +401,6 @@ def markdown_to_html(text):
     return ''.join(html_content)
 
 def render_page_as_image(pdf_doc, page_num):
-    """Renderuje stronę PDF jako obraz PNG."""
     try:
         if not pdf_doc or not (0 <= page_num < len(pdf_doc)): return None
         page = pdf_doc.load_page(page_num)
@@ -450,13 +411,12 @@ def render_page_as_image(pdf_doc, page_num):
         return None
 
 def extract_images_from_page(pdf_doc, page_num):
-    """Ekstrahuje obrazy o wymiarach większych niż 100x100 ze strony."""
     images = []
     if not pdf_doc or not (0 <= page_num < len(pdf_doc)): return images
     try:
         page = pdf_doc.load_page(page_num)
         for img_index, img in enumerate(page.get_images(full=True)):
-            xref = img
+            xref = img[0]
             base_image = pdf_doc.extract_image(xref)
             if base_image and base_image.get("width", 0) > 100 and base_image.get("height", 0) > 100:
                 images.append({'image': base_image['image'], 'ext': base_image['ext'], 'index': img_index})
@@ -465,7 +425,6 @@ def extract_images_from_page(pdf_doc, page_num):
     return images
 
 def create_zip_archive(data):
-    """Tworzy archiwum ZIP w pamięci na podstawie dostarczonych danych."""
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for item in data:
@@ -473,7 +432,6 @@ def create_zip_archive(data):
     return zip_buffer.getvalue()
 
 def parse_page_groups(input_text, total_pages):
-    """Parsuje tekst wejściowy z zakresami stron na listę grup."""
     if not input_text: raise ValueError("Nie podano zakresów stron.")
     groups, used_pages = [], set()
     for line in re.split(r'[;\n]+', input_text):
@@ -495,7 +453,7 @@ def parse_page_groups(input_text, total_pages):
                 pages.append(page)
         
         if not pages: continue
-        pages = sorted(dict.fromkeys(pages)) # Unikalne i posortowane
+        pages = sorted(dict.fromkeys(pages))
         if any(p in used_pages for p in pages): raise ValueError(f"Strony {pages} zostały już przypisane do innego artykułu.")
         used_pages.update(pages)
         groups.append(pages)
@@ -504,22 +462,18 @@ def parse_page_groups(input_text, total_pages):
     return groups
 
 def assign_article_result_to_pages(article_result):
-    """Przypisuje wynik przetwarzania grupowego do każdej strony wchodzącej w skład artykułu."""
     for page in article_result.get('page_numbers', []):
         page_index = page - 1
         if 0 <= page_index < len(st.session_state.extracted_pages):
-            # Tworzenie kopii wyniku dla każdej strony, aby uniknąć problemów z referencjami
             entry = {key: value for key, value in article_result.items() if key != 'page_numbers'}
             entry['page_number'] = page
             entry['group_pages'] = article_result.get('page_numbers', [])
-            # Oznaczenie pierwszej strony jako "głównej" dla grupy
-            entry['is_group_lead'] = (page == article_result.get('page_numbers', [page]))
+            entry['is_group_lead'] = (page == article_result.get('page_numbers', [page])[0])
             st.session_state.extracted_pages[page_index] = entry
 
 # --- KOMPONENTY UI ---
 
 def render_sidebar_project_controls():
-    """Renderuje kontrolki do zarządzania projektem w panelu bocznym."""
     st.subheader("📂 Projekt")
     projects = get_existing_projects()
     selected_project = st.selectbox("Wybierz istniejący projekt", ["Nowy projekt"] + projects)
@@ -528,19 +482,15 @@ def render_sidebar_project_controls():
         st.rerun()
 
 def render_sidebar_file_uploader():
-    """Renderuje uploader plików i obsługuje logikę wgrywania."""
     st.subheader("📄 Plik PDF")
     uploaded_file = st.file_uploader("Wybierz plik PDF", type="pdf")
     
-    # Scenariusz 1: Wgrano plik, a aplikacja czeka na niego po załadowaniu projektu.
     if uploaded_file and st.session_state.project_loaded_and_waiting_for_pdf:
         handle_file_upload(uploaded_file)
-    # Scenariusz 2: Wgrano nowy plik (inny niż poprzedni), tworząc nowy projekt.
     elif uploaded_file and uploaded_file.name != st.session_state.get('uploaded_filename'):
         handle_file_upload(uploaded_file)
 
 def render_sidebar_processing_options():
-    """Renderuje opcje trybu przetwarzania AI."""
     st.subheader("🤖 Opcje Przetwarzania")
     st.radio("Wybierz tryb:", ('all', 'range', 'article'), 
              captions=["Cały dokument", "Zakres stron", "Artykuł wielostronicowy"], 
@@ -562,7 +512,6 @@ def render_sidebar_processing_options():
         st.rerun()
 
 def render_sidebar():
-    """Główna funkcja renderująca cały panel boczny."""
     with st.sidebar:
         st.header("⚙️ Konfiguracja Projektu")
         render_sidebar_project_controls()
@@ -577,7 +526,6 @@ def render_sidebar():
             st.metric("Liczba stron", st.session_state.total_pages)
 
 def render_processing_status():
-    """Wyświetla pasek postępu i przyciski akcji (zapisz, pobierz)."""
     if st.session_state.processing_status == 'idle' or not st.session_state.pdf_doc:
         return
 
@@ -590,45 +538,35 @@ def render_processing_status():
         st.info(f"🔄 Przetwarzanie w toku... (Ukończono {processed_count}/{st.session_state.total_pages} stron)")
         st.progress(progress)
 
-    c1, c2, _ = st.columns()
-    if c1.button("💾 Zapisz postęp", use_container_width=True):
-        save_project()
-
-    # Logika pobierania artykułów - uwzględnia artykuły wielostronicowe
-    articles = [p for p in st.session_state.extracted_pages if p and p.get('type') == 'artykuł' and p.get('is_group_lead', True)]
-    if articles:
-        zip_data = [{'name': f"artykul_ze_str_{a['page_number']}.txt", 'content': a['raw_markdown'].encode('utf-8')} for a in articles if 'raw_markdown' in a]
-        if zip_data:
-            c2.download_button("📥 Pobierz artykuły", create_zip_archive(zip_data), f"{st.session_state.project_name}_artykuly.zip", "application/zip", use_container_width=True)
-
-def render_processing_status():
-    """Wyświetla pasek postępu i przyciski akcji (zapisz, pobierz)."""
-    if st.session_state.processing_status == 'idle' or not st.session_state.pdf_doc:
-        return
-
-    processed_count = sum(1 for p in st.session_state.extracted_pages if p is not None)
-    progress = processed_count / st.session_state.total_pages if st.session_state.total_pages > 0 else 0
-
-    if st.session_state.processing_status == 'complete':
-        st.success("✅ Przetwarzanie zakończone!")
-    else:
-        st.info(f"🔄 Przetwarzanie w toku... (Ukończono {processed_count}/{st.session_state.total_pages} stron)")
-        st.progress(progress)
-
-    # POPRAWKA: Dodano argument [1, 1, 3] do st.columns
     c1, c2, _ = st.columns([1, 1, 3])
     if c1.button("💾 Zapisz postęp", use_container_width=True):
         save_project()
 
-    # Logika pobierania artykułów - uwzględnia artykuły wielostronicowe
     articles = [p for p in st.session_state.extracted_pages if p and p.get('type') == 'artykuł' and p.get('is_group_lead', True)]
     if articles:
         zip_data = [{'name': f"artykul_ze_str_{a['page_number']}.txt", 'content': a['raw_markdown'].encode('utf-8')} for a in articles if 'raw_markdown' in a]
         if zip_data:
             c2.download_button("📥 Pobierz artykuły", create_zip_archive(zip_data), f"{st.session_state.project_name}_artykuly.zip", "application/zip", use_container_width=True)
 
+def render_navigation():
+    if st.session_state.total_pages <= 1:
+        return
+    st.subheader("📖 Nawigacja")
+    c1, c2, c3 = st.columns([1, 2, 1])
+    if c1.button("⬅️ Poprzednia", use_container_width=True, disabled=(st.session_state.current_page == 0)):
+        st.session_state.current_page -= 1
+        st.rerun()
+    c2.metric("Strona", f"{st.session_state.current_page + 1} / {st.session_state.total_pages}")
+    if c3.button("Następna ➡️", use_container_width=True, disabled=(st.session_state.current_page >= st.session_state.total_pages - 1)):
+        st.session_state.current_page += 1
+        st.rerun()
+
+    new_page = st.slider("Przejdź do strony:", 1, st.session_state.total_pages, st.session_state.current_page + 1) - 1
+    if new_page != st.session_state.current_page:
+        st.session_state.current_page = new_page
+        st.rerun()
+
 def render_original_pdf_column(page_index):
-    """Renderuje lewą kolumnę z podglądem oryginalnej strony PDF i opcjami obrazów."""
     with st.container():
         st.subheader(f"📄 Oryginał (Strona {page_index + 1})")
         image_data = render_page_as_image(st.session_state.pdf_doc, page_index)
@@ -645,7 +583,6 @@ def render_original_pdf_column(page_index):
             st.error("Nie można wyświetlić podglądu strony.")
 
 def render_ai_processed_column(page_index):
-    """Renderuje prawą kolumnę z tekstem przetworzonym przez AI i akcjami."""
     with st.container():
         st.subheader("🤖 Tekst przetworzony przez AI")
         raw_text = st.session_state.pdf_doc.load_page(page_index).get_text("text")
@@ -670,21 +607,17 @@ def render_ai_processed_column(page_index):
             st.info("⏳ Strona oczekuje na przetworzenie..." if st.session_state.processing_status == 'in_progress' else "Uruchom przetwarzanie w panelu bocznym.")
 
 def render_action_buttons(page_index, page_result):
-    """Renderuje przyciski akcji (przetwórz ponownie, generuj SEO)."""
     action_cols = st.columns(2)
     page_type = page_result.get('type')
 
-    # Przycisk "Przetwórz ponownie"
-    if action_cols.button("🔄 Przetwórz ponownie (z kontekstem)", key=f"reroll_{page_index}", use_container_width=True):
+    if action_cols[0].button("🔄 Przetwórz ponownie (z kontekstem)", key=f"reroll_{page_index}", use_container_width=True):
         handle_page_reroll(page_index)
 
-    # Przycisk "Generuj Meta Tagi"
     allow_meta = page_type == 'artykuł' and 'raw_markdown' in page_result and page_result.get('is_group_lead', True)
-    if action_cols.button("✨ SEO: Generuj Meta Tagi", key=f"meta_{page_index}", use_container_width=True, disabled=not allow_meta):
+    if action_cols[1].button("✨ SEO: Generuj Meta Tagi", key=f"meta_{page_index}", use_container_width=True, disabled=not allow_meta):
         handle_meta_tag_generation(page_index, page_result['raw_markdown'])
 
 def render_meta_tags_section(page_index):
-    """Wyświetla wygenerowane meta tagi, jeśli istnieją."""
     if page_index in st.session_state.meta_tags:
         tags = st.session_state.meta_tags[page_index]
         if "error" in tags:
@@ -695,7 +628,6 @@ def render_meta_tags_section(page_index):
                 st.text_area("Meta Description", value=tags.get("meta_description", ""), key=f"md_{page_index}")
 
 def render_page_view():
-    """Renderuje główny widok strony z podziałem na dwie kolumny."""
     st.divider()
     pdf_col, text_col = st.columns(2, gap="large")
     page_index = st.session_state.current_page
@@ -707,11 +639,9 @@ def render_page_view():
 # --- LOGIKA OBSŁUGI AKCJI ---
 
 def start_ai_processing():
-    """Rozpoczyna proces przetwarzania AI na podstawie wybranych opcji."""
     if st.session_state.processing_mode == 'article':
         try:
             groups = parse_page_groups(st.session_state.article_page_groups_input, st.session_state.total_pages)
-            # Wyczyszczenie poprzednich wyników dla stron, które będą przetwarzane
             for group in groups:
                 for page in group:
                     st.session_state.extracted_pages[page - 1] = None
@@ -731,7 +661,6 @@ def start_ai_processing():
             st.error("Strona początkowa nie może być większa niż końcowa.")
             return
         
-        # Wyczyszczenie poprzednich wyników dla stron w zakresie
         for i in range(start_idx, end_idx + 1):
             st.session_state.extracted_pages[i] = None
             
@@ -740,7 +669,6 @@ def start_ai_processing():
         st.session_state.processing_end_page_index = end_idx
 
 def handle_page_reroll(page_index):
-    """Obsługuje ponowne przetwarzanie pojedynczej strony z dodatkowym kontekstem."""
     with st.spinner("Przetwarzanie strony z kontekstem..."):
         prev_text = st.session_state.pdf_doc.load_page(page_index - 1).get_text("text") if page_index > 0 else ""
         curr_text = st.session_state.pdf_doc.load_page(page_index).get_text("text")
@@ -753,7 +681,6 @@ def handle_page_reroll(page_index):
     st.rerun()
 
 def handle_meta_tag_generation(page_index, raw_markdown):
-    """Obsługuje generowanie meta tagów dla artykułu."""
     with st.spinner("Generowanie meta tagów..."):
         client = get_openai_client()
         tags = asyncio.run(generate_meta_tags_async(client, raw_markdown, st.session_state.model))
@@ -761,7 +688,6 @@ def handle_meta_tag_generation(page_index, raw_markdown):
     st.rerun()
 
 def run_ai_processing_loop():
-    """Wykonuje jeden krok pętli przetwarzania AI (jeden artykuł lub jedna partia stron)."""
     client = get_openai_client()
     if not client:
         st.error("Klucz API OpenAI nie jest skonfigurowany.")
