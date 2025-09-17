@@ -601,24 +601,31 @@ def render_processing_status():
         if zip_data:
             c2.download_button("📥 Pobierz artykuły", create_zip_archive(zip_data), f"{st.session_state.project_name}_artykuly.zip", "application/zip", use_container_width=True)
 
-def render_navigation():
-    """Renderuje nawigację między stronami."""
-    if st.session_state.total_pages <= 1:
+def render_processing_status():
+    """Wyświetla pasek postępu i przyciski akcji (zapisz, pobierz)."""
+    if st.session_state.processing_status == 'idle' or not st.session_state.pdf_doc:
         return
-    st.subheader("📖 Nawigacja")
-    c1, c2, c3 = st.columns()
-    if c1.button("⬅️ Poprzednia", use_container_width=True, disabled=(st.session_state.current_page == 0)):
-        st.session_state.current_page -= 1
-        st.rerun()
-    c2.metric("Strona", f"{st.session_state.current_page + 1} / {st.session_state.total_pages}")
-    if c3.button("Następna ➡️", use_container_width=True, disabled=(st.session_state.current_page >= st.session_state.total_pages - 1)):
-        st.session_state.current_page += 1
-        st.rerun()
 
-    new_page = st.slider("Przejdź do strony:", 1, st.session_state.total_pages, st.session_state.current_page + 1) - 1
-    if new_page != st.session_state.current_page:
-        st.session_state.current_page = new_page
-        st.rerun()
+    processed_count = sum(1 for p in st.session_state.extracted_pages if p is not None)
+    progress = processed_count / st.session_state.total_pages if st.session_state.total_pages > 0 else 0
+
+    if st.session_state.processing_status == 'complete':
+        st.success("✅ Przetwarzanie zakończone!")
+    else:
+        st.info(f"🔄 Przetwarzanie w toku... (Ukończono {processed_count}/{st.session_state.total_pages} stron)")
+        st.progress(progress)
+
+    # POPRAWKA: Dodano argument [1, 1, 3] do st.columns
+    c1, c2, _ = st.columns([1, 1, 3])
+    if c1.button("💾 Zapisz postęp", use_container_width=True):
+        save_project()
+
+    # Logika pobierania artykułów - uwzględnia artykuły wielostronicowe
+    articles = [p for p in st.session_state.extracted_pages if p and p.get('type') == 'artykuł' and p.get('is_group_lead', True)]
+    if articles:
+        zip_data = [{'name': f"artykul_ze_str_{a['page_number']}.txt", 'content': a['raw_markdown'].encode('utf-8')} for a in articles if 'raw_markdown' in a]
+        if zip_data:
+            c2.download_button("📥 Pobierz artykuły", create_zip_archive(zip_data), f"{st.session_state.project_name}_artykuly.zip", "application/zip", use_container_width=True)
 
 def render_original_pdf_column(page_index):
     """Renderuje lewą kolumnę z podglądem oryginalnej strony PDF i opcjami obrazów."""
