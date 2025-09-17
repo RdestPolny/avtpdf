@@ -582,10 +582,7 @@ def render_processing_status():
         return
 
     processed_count = sum(1 for p in st.session_state.extracted_pages if p is not None)
-    if st.session_state.total_pages > 0:
-        progress = processed_count / st.session_state.total_pages
-    else:
-        progress = 0
+    progress = processed_count / st.session_state.total_pages if st.session_state.total_pages > 0 else 0
 
     if st.session_state.processing_status == 'complete':
         st.success("✅ Przetwarzanie zakończone!")
