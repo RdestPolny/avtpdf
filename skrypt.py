@@ -256,7 +256,7 @@ async def process_page_async(client, page_num, raw_text, model):
 
 async def process_article_group_async(client, page_numbers, raw_text, model):
     prompt = get_article_group_processing_prompt(raw_text)
-    ai_result = await _call_openai_api(client, prompt, model, 99999)
+    ai_result = await _call_openai_api(client, prompt, model, 16384)
     
     article_data = {"page_numbers": page_numbers}
     if "error" in ai_result:
