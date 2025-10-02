@@ -742,6 +742,11 @@ def start_ai_processing():
             st.session_state.article_groups = groups
             st.session_state.next_article_index = 0
             st.session_state.processing_status = 'in_progress'
+            
+            # Automatycznie przejdź do pierwszej strony pierwszego artykułu
+            if groups:
+                st.session_state.current_page = groups[0][0] - 1
+            
         except ValueError as e:
             st.error(str(e))
             return
@@ -763,6 +768,9 @@ def start_ai_processing():
         st.session_state.processing_status = 'in_progress'
         st.session_state.next_batch_start_index = start_idx
         st.session_state.processing_end_page_index = end_idx
+        
+        # Automatycznie przejdź do pierwszej przetwarzanej strony
+        st.session_state.current_page = start_idx
 
 def run_ai_processing_loop():
     """Główna pętla przetwarzania AI"""
@@ -942,6 +950,12 @@ def render_processing_status():
         
         if st.session_state.processing_status == 'complete':
             st.success(f"✅ Przetwarzanie zakończone! Przetworzono {total_groups} artykuł(ów).")
+            
+            # Przycisk szybkiej nawigacji do pierwszego artykułu
+            if st.session_state.article_groups:
+                if st.button("📖 Przejdź do pierwszego artykułu", type="secondary"):
+                    st.session_state.current_page = st.session_state.article_groups[0][0] - 1
+                    st.rerun()
         else:
             st.info(f"🔄 Przetwarzanie artykułów... ({processed_groups}/{total_groups})")
             st.progress(progress)
@@ -950,6 +964,16 @@ def render_processing_status():
         
         if st.session_state.processing_status == 'complete':
             st.success("✅ Przetwarzanie zakończone!")
+            
+            # Przyciski szybkiej nawigacji do zakresu
+            if st.session_state.processing_mode == 'range':
+                nav_button_cols = st.columns(2)
+                if nav_button_cols[0].button("📖 Przejdź do początku zakresu", type="secondary"):
+                    st.session_state.current_page = st.session_state.start_page - 1
+                    st.rerun()
+                if nav_button_cols[1].button("📖 Przejdź do końca zakresu", type="secondary"):
+                    st.session_state.current_page = st.session_state.end_page - 1
+                    st.rerun()
         else:
             st.info(f"🔄 Przetwarzanie w toku... (Ukończono {processed_count}/{st.session_state.total_pages} stron)")
             st.progress(progress)
@@ -989,6 +1013,47 @@ def render_navigation():
     
     st.subheader("📖 Nawigacja")
     
+    # Informacja o zakresie przetwarzania
+    if st.session_state.processing_mode == 'range':
+        processing_range = f"{st.session_state.start_page}-{st.session_state.end_page}"
+        st.info(f"🎯 Przetwarzany zakres: strony {processing_range}")
+        
+        # Przyciski szybkiej nawigacji
+        nav_cols = st.columns(3)
+        if nav_cols[0].button("⏮️ Początek zakresu", use_container_width=True):
+            st.session_state.current_page = st.session_state.start_page - 1
+            st.rerun()
+        if nav_cols[1].button("⏭️ Koniec zakresu", use_container_width=True):
+            st.session_state.current_page = st.session_state.end_page - 1
+            st.rerun()
+        if nav_cols[2].button("🏠 Początek dokumentu", use_container_width=True):
+            st.session_state.current_page = 0
+            st.rerun()
+        
+        st.divider()
+    
+    elif st.session_state.processing_mode == 'article' and st.session_state.article_groups:
+        st.info(f"🎯 Liczba artykułów: {len(st.session_state.article_groups)}")
+        
+        # Przyciski nawigacji do artykułów
+        article_nav_cols = st.columns(min(len(st.session_state.article_groups), 5))
+        for idx, group in enumerate(st.session_state.article_groups[:5]):
+            label = f"Art. {idx+1}"
+            if len(group) > 1:
+                label += f" ({group[0]}-{group[-1]})"
+            else:
+                label += f" (str. {group[0]})"
+            
+            if article_nav_cols[idx % 5].button(label, use_container_width=True, key=f"nav_art_{idx}"):
+                st.session_state.current_page = group[0] - 1
+                st.rerun()
+        
+        if len(st.session_state.article_groups) > 5:
+            st.caption(f"... i jeszcze {len(st.session_state.article_groups) - 5} artykułów")
+        
+        st.divider()
+    
+    # Standardowa nawigacja
     c1, c2, c3 = st.columns([1, 2, 1])
     
     if c1.button(
@@ -1009,6 +1074,7 @@ def render_navigation():
         st.session_state.current_page += 1
         st.rerun()
     
+    # Slider nawigacji
     new_page = st.slider(
         "Przejdź do strony:",
         1,
@@ -1323,6 +1389,7 @@ def main():
                 - Generowanie meta tagów SEO
                 - **Eksport do HTML** - czysty HTML bez stylowania
                 - Ponowne przetwarzanie stron z kontekstem
+                - **Automatyczna nawigacja** - przejście do zakresu po rozpoczęciu
                 """)
         return
     
