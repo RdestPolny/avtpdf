@@ -408,23 +408,18 @@ def markdown_to_clean_html(markdown_text: str, page_number: int = None) -> str:
     Konwertuje markdown na czysty HTML bez stylowania
     Tylko struktura: h1, h2, h3, h4, p, strong, hr
     """
-    # Podstawowa konwersja markdown
     html = markdown_text
     
-    # Separatory poziome
     html = html.replace('\n---\n', '\n<hr>\n')
     html = html.replace('\n--- \n', '\n<hr>\n')
     
-    # Nagłówki
     html = re.sub(r'^\s*# (.*?)\s*$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
     html = re.sub(r'^\s*## (.*?)\s*$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
     html = re.sub(r'^\s*### (.*?)\s*$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
     html = re.sub(r'^\s*#### (.*?)\s*$', r'<h4>\1</h4>', html, flags=re.MULTILINE)
     
-    # Pogrubienia
     html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
     
-    # Podział na paragrafy
     paragraphs = html.split('\n\n')
     formatted_paragraphs = []
     
@@ -433,11 +428,9 @@ def markdown_to_clean_html(markdown_text: str, page_number: int = None) -> str:
         if not para:
             continue
         
-        # Jeśli to już jest tag HTML, zostaw bez zmian
         if para.startswith(('<h1', '<h2', '<h3', '<h4', '<hr', '<p')):
             formatted_paragraphs.append(para)
         else:
-            # Zamień pojedyncze newline na <br>, owinięcie w <p>
             para_with_breaks = para.replace('\n', '<br>\n')
             formatted_paragraphs.append(f'<p>{para_with_breaks}</p>')
     
@@ -446,15 +439,6 @@ def markdown_to_clean_html(markdown_text: str, page_number: int = None) -> str:
 def generate_full_html_document(content: str, title: str = "Artykuł", meta_title: str = None, meta_description: str = None) -> str:
     """
     Generuje pełny dokument HTML z czystą strukturą (bez CSS)
-    
-    Args:
-        content: Zawartość HTML (bez tagów html, head, body)
-        title: Tytuł dokumentu
-        meta_title: Meta title (opcjonalny)
-        meta_description: Meta description (opcjonalny)
-    
-    Returns:
-        Pełny dokument HTML
     """
     meta_tags = ""
     if meta_title:
@@ -479,10 +463,6 @@ def generate_full_html_document(content: str, title: str = "Artykuł", meta_titl
 def get_article_html_from_page(page_index: int) -> Optional[Dict]:
     """
     Pobiera czysty HTML artykułu dla danej strony
-    Jeśli strona jest częścią grupy, zwraca cały artykuł
-    
-    Returns:
-        Dict z kluczami: 'html_content', 'html_document', 'title', 'pages'
     """
     page_result = st.session_state.extracted_pages[page_index]
     
@@ -492,11 +472,9 @@ def get_article_html_from_page(page_index: int) -> Optional[Dict]:
     if 'raw_markdown' not in page_result:
         return None
     
-    # Sprawdź czy to część grupy
     group_pages = page_result.get('group_pages', [])
     
     if group_pages and len(group_pages) > 1:
-        # Artykuł wielostronicowy - pobierz z pierwszej strony grupy
         first_page_index = group_pages[0] - 1
         first_page_result = st.session_state.extracted_pages[first_page_index]
         
@@ -504,15 +482,12 @@ def get_article_html_from_page(page_index: int) -> Optional[Dict]:
         title = f"Artykuł ze stron {group_pages[0]}-{group_pages[-1]}"
         pages = group_pages
     else:
-        # Pojedyncza strona
         markdown_content = page_result.get('raw_markdown', '')
         title = f"Artykuł ze strony {page_index + 1}"
         pages = [page_index + 1]
     
-    # Konwertuj markdown na czysty HTML
     html_content = markdown_to_clean_html(markdown_content)
     
-    # Pobierz meta tagi jeśli istnieją
     meta_title = None
     meta_description = None
     
@@ -522,7 +497,6 @@ def get_article_html_from_page(page_index: int) -> Optional[Dict]:
             meta_title = tags.get('meta_title')
             meta_description = tags.get('meta_description')
     
-    # Wygeneruj pełny dokument HTML
     html_document = generate_full_html_document(
         html_content,
         title=title,
@@ -1155,19 +1129,16 @@ def render_page_view():
             ):
                 handle_meta_tag_generation(page_index, page_result['raw_markdown'])
             
-            # NOWY PRZYCISK - POKAŻ HTML
-            if action_cols[2].button(
-                "📄 HTML",
-                key=f"show_html_{page_index}",
-                use_container_width=True,
+            # Checkbox do pokazywania HTML
+            show_html = action_cols[2].checkbox(
+                "📄 Pokaż HTML",
+                key=f"show_html_checkbox_{page_index}",
                 disabled=not allow_meta,
                 help="Pokaż i pobierz czysty HTML artykułu"
-            ):
-                st.session_state[f'show_html_{page_index}'] = not st.session_state.get(f'show_html_{page_index}', False)
-                st.rerun()
+            )
             
-            # WYŚWIETLENIE HTML JEŚLI WŁĄCZONE
-            if st.session_state.get(f'show_html_{page_index}', False):
+            # WYŚWIETLENIE HTML JEŚLI CHECKBOX ZAZNACZONY
+            if show_html and allow_meta:
                 html_data = get_article_html_from_page(page_index)
                 
                 if html_data:
@@ -1182,28 +1153,27 @@ def render_page_view():
                         with tab1:
                             st.code(html_data['html_content'], language='html', line_numbers=True)
                             
-                            # Przycisk pobierania samej zawartości
                             st.download_button(
                                 label="📥 Pobierz zawartość HTML",
                                 data=html_data['html_content'],
                                 file_name=f"{sanitize_filename(html_data['title'])}_content.html",
                                 mime="text/html",
-                                use_container_width=True
+                                use_container_width=True,
+                                key=f"download_content_{page_index}"
                             )
                         
                         with tab2:
                             st.code(html_data['html_document'], language='html', line_numbers=True)
                             
-                            # Przycisk pobierania pełnego dokumentu
                             st.download_button(
                                 label="📥 Pobierz pełny dokument HTML",
                                 data=html_data['html_document'],
                                 file_name=f"{sanitize_filename(html_data['title'])}.html",
                                 mime="text/html",
-                                use_container_width=True
+                                use_container_width=True,
+                                key=f"download_full_{page_index}"
                             )
                         
-                        # Informacje o meta tagach jeśli istnieją
                         if html_data['meta_title'] or html_data['meta_description']:
                             st.info("ℹ️ Ten HTML zawiera wygenerowane meta tagi SEO")
             
