@@ -1,29 +1,50 @@
+"""
+Redaktor AI - Interaktywny Procesor Dokumentów
+===============================================
+
+INSTALACJA ZALEŻNOŚCI:
+----------------------
+pip uninstall docx  # WAŻNE: Usuń złą bibliotekę jeśli jest zainstalowana!
+pip install streamlit PyMuPDF openai python-docx mammoth
+
+MINIMALNA KONFIGURACJA (tylko PDF):
+pip install streamlit PyMuPDF openai
+
+URUCHOMIENIE:
+streamlit run skrypt.py
+"""
+
 import streamlit as st
 import fitz  # PyMuPDF
 from openai import AsyncOpenAI
-import os
 import io
 import zipfile
 import json
 from pathlib import Path
 import re
 import asyncio
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass
-import docx
-from docx.document import Document as DocxDocument
-from docx.oxml.table import CT_Tbl
-from docx.oxml.text.paragraph import CT_P
-from docx.table import _Cell, Table
-from docx.text.paragraph import Paragraph
-import mammoth
+
+# Opcjonalne importy - aplikacja będzie działać bez nich (tylko PDF)
+try:
+    from docx import Document as DocxDocument
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
+try:
+    import mammoth
+    MAMMOTH_AVAILABLE = True
+except ImportError:
+    MAMMOTH_AVAILABLE = False
 
 # ===== KONFIGURACJA =====
 
 PROJECTS_DIR = Path("pdf_processor_projects")
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-DEFAULT_MODEL = 'gpt-4o-mini'  # Prawdziwy model OpenAI
+DEFAULT_MODEL = 'gpt-4o-mini'
 
 SESSION_STATE_DEFAULTS = {
     'processing_status': 'idle',
@@ -62,13 +83,14 @@ class PageContent:
             self.images = []
 
 class DocumentHandler:
-    """Abstrakcyjna klasa do obsługi różnych formatów dokumentów"""
+    """Klasa do obsługi różnych formatów dokumentów"""
     
     def __init__(self, file_bytes: bytes, filename: str):
         self.file_bytes = file_bytes
         self.filename = filename
         self.file_type = self._detect_file_type(filename)
         self._document = None
+        self._html_content = None
         self._load_document()
     
     def _detect_file_type(self, filename: str) -> str:
@@ -76,8 +98,12 @@ class DocumentHandler:
         if ext == '.pdf':
             return 'pdf'
         elif ext == '.docx':
+            if not DOCX_AVAILABLE:
+                raise ValueError("Format DOCX nie jest obsługiwany. Zainstaluj: pip install python-docx")
             return 'docx'
         elif ext == '.doc':
+            if not MAMMOTH_AVAILABLE:
+                raise ValueError("Format DOC nie jest obsługiwany. Zainstaluj: pip install mammoth")
             return 'doc'
         else:
             raise ValueError(f"Nieobsługiwany format pliku: {ext}")
@@ -87,24 +113,21 @@ class DocumentHandler:
         if self.file_type == 'pdf':
             self._document = fitz.open(stream=self.file_bytes, filetype="pdf")
         elif self.file_type == 'docx':
-            self._document = docx.Document(io.BytesIO(self.file_bytes))
+            self._document = DocxDocument(io.BytesIO(self.file_bytes))
         elif self.file_type == 'doc':
-            # Konwersja DOC do HTML używając mammoth
             result = mammoth.convert_to_html(io.BytesIO(self.file_bytes))
             self._html_content = result.value
+            self._document = None
     
     def get_page_count(self) -> int:
         """Zwraca liczbę stron w dokumencie"""
         if self.file_type == 'pdf':
             return len(self._document)
         elif self.file_type == 'docx':
-            # Dla DOCX liczymy paragrafy jako "strony" lub dzielimy na sekcje
-            # Prostsze podejście: dzielimy dokument na fragmenty ~500 słów
             all_text = '\n\n'.join([p.text for p in self._document.paragraphs])
             words = all_text.split()
             return max(1, len(words) // 500 + (1 if len(words) % 500 > 0 else 0))
         elif self.file_type == 'doc':
-            # Podobnie dla DOC
             words = self._html_content.split()
             return max(1, len(words) // 500 + (1 if len(words) % 500 > 0 else 0))
         return 0
@@ -133,15 +156,12 @@ class DocumentHandler:
         end_word = min(start_word + words_per_page, len(words))
         
         page_text = ' '.join(words[start_word:end_word])
-        
-        # Wyciąganie obrazów z DOCX
         images = self._extract_images_from_docx()
         
         return PageContent(page_index + 1, page_text, images)
     
     def _get_doc_page_content(self, page_index: int) -> PageContent:
         """Pobiera zawartość z DOC (HTML)"""
-        # Usuń tagi HTML
         text = re.sub('<[^<]+?>', '', self._html_content)
         words = text.split()
         words_per_page = 500
@@ -255,6 +275,7 @@ FORMAT ODPOWIEDZI:
     async def process_text(self, text: str, system_prompt: str, max_tokens: int = 4096) -> Dict:
         """Przetwarza tekst przez OpenAI API"""
         last_error = None
+        content = ""
         
         for attempt in range(MAX_RETRIES):
             try:
@@ -274,7 +295,6 @@ FORMAT ODPOWIEDZI:
                 if not content:
                     raise ValueError("API zwróciło pustą odpowiedź.")
                 
-                # Próba parsowania JSON
                 return json.loads(content)
                 
             except json.JSONDecodeError as e:
@@ -291,14 +311,13 @@ FORMAT ODPOWIEDZI:
         return {
             "error": f"Błąd po {MAX_RETRIES} próbach.",
             "last_known_error": str(last_error),
-            "raw_response": content if 'content' in locals() else "Brak odpowiedzi"
+            "raw_response": content
         }
     
     async def process_page(self, page_content: PageContent) -> Dict:
         """Przetwarza pojedynczą stronę"""
         page_data = {"page_number": page_content.page_number}
         
-        # Sprawdź czy strona ma wystarczająco dużo tekstu
         if len(page_content.text.split()) < 20:
             page_data["type"] = "pominięta"
             page_data["formatted_content"] = "<i>Strona zawiera zbyt mało tekstu.</i>"
@@ -329,7 +348,6 @@ FORMAT ODPOWIEDZI:
         """Przetwarza grupę stron jako jeden artykuł"""
         page_numbers = [p.page_number for p in pages_content]
         
-        # Łączenie tekstu ze wszystkich stron
         combined_text = "\n\n".join([
             f"--- STRONA {p.page_number} ---\n{p.text.strip()}"
             for p in pages_content
@@ -483,7 +501,6 @@ def save_project():
     project_path = PROJECTS_DIR / st.session_state.project_name
     project_path.mkdir(exist_ok=True)
     
-    # Przygotowanie stanu do zapisu
     state_to_save = {
         k: v for k, v in st.session_state.items()
         if k not in ['document', 'project_loaded_and_waiting_for_file']
@@ -553,7 +570,6 @@ def handle_file_upload(uploaded_file):
                 st.session_state.project_loaded_and_waiting_for_file = False
                 st.success("✅ Plik pomyślnie dopasowany do projektu.")
             else:
-                # Nowy projekt
                 for key, value in SESSION_STATE_DEFAULTS.items():
                     if key != 'api_key':
                         st.session_state[key] = value
@@ -609,7 +625,6 @@ def start_ai_processing():
                 st.session_state.total_pages
             )
             
-            # Resetuj strony w grupach
             for group in groups:
                 for page in group:
                     st.session_state.extracted_pages[page - 1] = None
@@ -621,11 +636,10 @@ def start_ai_processing():
             st.error(str(e))
             return
     else:
-        # Tryb 'all' lub 'range'
         if st.session_state.processing_mode == 'all':
             start_idx = 0
             end_idx = st.session_state.total_pages - 1
-        else:  # range
+        else:
             start_idx = st.session_state.start_page - 1
             end_idx = st.session_state.end_page - 1
         
@@ -633,7 +647,6 @@ def start_ai_processing():
             st.error("Strona początkowa nie może być większa niż końcowa.")
             return
         
-        # Resetuj strony do przetworzenia
         for i in range(start_idx, end_idx + 1):
             st.session_state.extracted_pages[i] = None
         
@@ -651,11 +664,9 @@ def run_ai_processing_loop():
     ai_processor = AIProcessor(st.session_state.api_key, st.session_state.model)
     
     if st.session_state.processing_mode == 'article':
-        # Tryb artykułu wielostronicowego
         if st.session_state.next_article_index < len(st.session_state.article_groups):
             article_pages = st.session_state.article_groups[st.session_state.next_article_index]
             
-            # Pobierz zawartość wszystkich stron artykułu
             pages_content = []
             for page_num in article_pages:
                 if st.session_state.document and 0 <= page_num - 1 < st.session_state.total_pages:
@@ -663,12 +674,10 @@ def run_ai_processing_loop():
                         st.session_state.document.get_page_content(page_num - 1)
                     )
             
-            # Przetwórz artykuł jako całość
             article_result = asyncio.run(
                 ai_processor.process_article_group(pages_content)
             )
             
-            # Przypisz wynik do wszystkich stron w grupie
             for page in article_pages:
                 page_index = page - 1
                 if 0 <= page_index < len(st.session_state.extracted_pages):
@@ -685,7 +694,6 @@ def run_ai_processing_loop():
         else:
             st.session_state.processing_status = 'complete'
     else:
-        # Tryb batch (all/range)
         if st.session_state.next_batch_start_index <= st.session_state.processing_end_page_index:
             asyncio.run(
                 process_batch(ai_processor, st.session_state.next_batch_start_index)
@@ -700,7 +708,6 @@ def run_ai_processing_loop():
 
 def init_session_state():
     """Inicjalizuje stan sesji"""
-    # Sprawdź klucz API w secrets
     if 'api_key' not in st.session_state or st.session_state.api_key is None:
         st.session_state.api_key = st.secrets.get("openai", {}).get("api_key")
     
@@ -713,7 +720,6 @@ def render_sidebar():
     with st.sidebar:
         st.header("⚙️ Konfiguracja Projektu")
         
-        # Zarządzanie projektami
         projects = get_existing_projects()
         selected_project = st.selectbox(
             "Wybierz istniejący projekt",
@@ -726,10 +732,17 @@ def render_sidebar():
         
         st.divider()
         
-        # Upload pliku
+        supported_formats = ["pdf"]
+        if DOCX_AVAILABLE:
+            supported_formats.append("docx")
+        if MAMMOTH_AVAILABLE:
+            supported_formats.append("doc")
+        
+        file_label = f"Wybierz plik ({', '.join(f.upper() for f in supported_formats)})"
+        
         uploaded_file = st.file_uploader(
-            "Wybierz plik (PDF, DOCX, DOC)",
-            type=["pdf", "docx", "doc"]
+            file_label,
+            type=supported_formats
         )
         
         if uploaded_file:
@@ -741,7 +754,6 @@ def render_sidebar():
             st.divider()
             st.subheader("🤖 Opcje Przetwarzania")
             
-            # Wybór trybu
             st.radio(
                 "Wybierz tryb:",
                 ('all', 'range', 'article'),
@@ -780,7 +792,6 @@ def render_sidebar():
             
             st.divider()
             
-            # Przycisk start
             processing_disabled = (
                 st.session_state.processing_status == 'in_progress' or
                 not st.session_state.api_key
@@ -803,7 +814,6 @@ def render_sidebar():
             
             st.divider()
             
-            # Informacje o projekcie
             st.info(f"**Projekt:** {st.session_state.project_name}")
             st.metric("Liczba stron", st.session_state.total_pages)
             st.caption(f"**Format:** {st.session_state.file_type.upper()}")
@@ -813,11 +823,9 @@ def render_processing_status():
     if st.session_state.processing_status == 'idle' or not st.session_state.document:
         return
     
-    # Oblicz postęp
     processed_count = sum(1 for p in st.session_state.extracted_pages if p is not None)
     
     if st.session_state.processing_mode == 'article':
-        # W trybie artykułu liczymy przetworzone grupy
         total_groups = len(st.session_state.article_groups)
         processed_groups = st.session_state.next_article_index
         progress = processed_groups / total_groups if total_groups > 0 else 0
@@ -828,8 +836,6 @@ def render_processing_status():
             st.info(f"🔄 Przetwarzanie artykułów... ({processed_groups}/{total_groups})")
             st.progress(progress)
     else:
-        # W trybie batch
-        total_to_process = st.session_state.processing_end_page_index - (st.session_state.processing_end_page_index - st.session_state.total_pages) + 1
         progress = processed_count / st.session_state.total_pages if st.session_state.total_pages > 0 else 0
         
         if st.session_state.processing_status == 'complete':
@@ -838,13 +844,11 @@ def render_processing_status():
             st.info(f"🔄 Przetwarzanie w toku... (Ukończono {processed_count}/{st.session_state.total_pages} stron)")
             st.progress(progress)
     
-    # Przyciski akcji
     c1, c2, _ = st.columns([1, 1, 3])
     
     if c1.button("💾 Zapisz postęp", use_container_width=True):
         save_project()
     
-    # Przycisk pobierania artykułów
     articles = [
         p for p in st.session_state.extracted_pages
         if p and p.get('type') == 'artykuł' and p.get('is_group_lead', True)
@@ -895,7 +899,6 @@ def render_navigation():
         st.session_state.current_page += 1
         st.rerun()
     
-    # Slider nawigacji
     new_page = st.slider(
         "Przejdź do strony:",
         1,
@@ -919,7 +922,6 @@ def render_page_view():
     with pdf_col:
         st.subheader(f"📄 Oryginał (Strona {page_index + 1})")
         
-        # Renderuj podgląd (tylko dla PDF)
         if st.session_state.file_type == 'pdf':
             image_data = st.session_state.document.render_page_as_image(page_index)
             if image_data:
@@ -929,7 +931,6 @@ def render_page_view():
         else:
             st.info(f"Podgląd nie jest dostępny dla plików {st.session_state.file_type.upper()}.")
         
-        # Wyświetl obrazy
         if page_content.images:
             with st.expander(f"🖼️ Pokaż/ukryj {len(page_content.images)} obraz(y)"):
                 for img in page_content.images:
@@ -939,7 +940,6 @@ def render_page_view():
                         use_container_width=True
                     )
             
-            # Przycisk pobierania obrazów
             img_zip = create_zip_archive([
                 {
                     'name': f"str_{page_index+1}_img_{i['index']}.{i['ext']}",
@@ -959,7 +959,6 @@ def render_page_view():
     with text_col:
         st.subheader("🤖 Tekst przetworzony przez AI")
         
-        # Surowy tekst
         with st.expander("👁️ Pokaż surowy tekst wejściowy"):
             st.text_area(
                 "Surowy tekst",
@@ -969,7 +968,6 @@ def render_page_view():
                 key=f"raw_text_{page_index}"
             )
         
-        # Wynik przetwarzania
         page_result = st.session_state.extracted_pages[page_index]
         
         if page_result:
@@ -988,21 +986,17 @@ def render_page_view():
                 unsafe_allow_html=True
             )
             
-            # Informacja o grupie
             group_pages = page_result.get('group_pages', [])
             if group_pages and len(group_pages) > 1:
                 st.info(f"Ten artykuł obejmuje strony: {', '.join(str(p) for p in group_pages)}.")
             
-            # Sformatowana treść
             st.markdown(
                 f"<div class='page-text-wrapper'>{page_result.get('formatted_content', '')}</div>",
                 unsafe_allow_html=True
             )
             
-            # Akcje
             action_cols = st.columns(2)
             
-            # Przycisk ponownego przetwarzania
             if action_cols[0].button(
                 "🔄 Przetwórz ponownie",
                 key=f"reroll_{page_index}",
@@ -1010,7 +1004,6 @@ def render_page_view():
             ):
                 handle_page_reroll(page_index)
             
-            # Przycisk generowania meta tagów
             allow_meta = (
                 page_type == 'artykuł' and
                 'raw_markdown' in page_result and
@@ -1025,7 +1018,6 @@ def render_page_view():
             ):
                 handle_meta_tag_generation(page_index, page_result['raw_markdown'])
             
-            # Wyświetl meta tagi jeśli istnieją
             if page_index in st.session_state.meta_tags:
                 tags = st.session_state.meta_tags[page_index]
                 
@@ -1052,7 +1044,6 @@ def render_page_view():
 def handle_page_reroll(page_index: int):
     """Przetwarza stronę ponownie z kontekstem"""
     with st.spinner("Przetwarzanie strony z kontekstem..."):
-        # Pobierz kontekst (poprzednia i następna strona)
         prev_text = ""
         if page_index > 0:
             prev_content = st.session_state.document.get_page_content(page_index - 1)
@@ -1066,14 +1057,12 @@ def handle_page_reroll(page_index: int):
             next_content = st.session_state.document.get_page_content(page_index + 1)
             next_text = next_content.text
         
-        # Połącz z kontekstem
         context_text = (
             f"KONTEKST (POPRZEDNIA STRONA):\n{prev_text}\n\n"
             f"--- STRONA DOCELOWA ---\n{curr_text}\n\n"
             f"KONTEKST (NASTĘPNA STRONA):\n{next_text}"
         )
         
-        # Przetwórz
         ai_processor = AIProcessor(st.session_state.api_key, st.session_state.model)
         page_content = PageContent(page_index + 1, context_text)
         new_result = asyncio.run(ai_processor.process_page(page_content))
@@ -1100,7 +1089,6 @@ def main():
         page_icon="🚀"
     )
     
-    # Style CSS
     st.markdown("""
     <style>
     .page-text-wrapper {
@@ -1130,17 +1118,26 @@ def main():
     
     st.title("🚀 Redaktor AI - Interaktywny Procesor Dokumentów")
     
-    # Inicjalizacja
     init_session_state()
     
-    # Sprawdź klucz API
+    if not DOCX_AVAILABLE or not MAMMOTH_AVAILABLE:
+        missing = []
+        if not DOCX_AVAILABLE:
+            missing.append("DOCX (zainstaluj: pip install python-docx)")
+        if not MAMMOTH_AVAILABLE:
+            missing.append("DOC (zainstaluj: pip install mammoth)")
+        
+        with st.sidebar:
+            with st.expander("⚠️ Ograniczona funkcjonalność", expanded=False):
+                st.warning("Niektóre formaty plików nie są dostępne:")
+                for fmt in missing:
+                    st.write(f"- {fmt}")
+    
     if not st.session_state.api_key:
         st.error("❌ Brak klucza API OpenAI!")
-        st.info("Proszę skonfiguruj swój klucz API w pliku `.streamlit/secrets.toml`.")
-        st.code('[openai]\napi_key = "sk-..."', language="toml")
+        st.info("Proszę skonfiguruj swój klucz API w Streamlit Secrets.")
         st.stop()
     
-    # Renderuj UI
     render_sidebar()
     
     if not st.session_state.document:
@@ -1168,14 +1165,11 @@ def main():
                 """)
         return
     
-    # Status przetwarzania
     render_processing_status()
     
-    # Pętla przetwarzania
     if st.session_state.processing_status == 'in_progress':
         run_ai_processing_loop()
     else:
-        # Nawigacja i widok strony
         render_navigation()
         render_page_view()
 
