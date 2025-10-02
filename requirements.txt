@@ -1,6 +1,5 @@
-# requirements.txt
-
 streamlit
-openai
 PyMuPDF
-docx
+openai
+python-docx
+mammoth
