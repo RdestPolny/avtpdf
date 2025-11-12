@@ -3,3 +3,5 @@ PyMuPDF
 openai
 python-docx
 mammoth
+paddlepaddle
+paddleocr
