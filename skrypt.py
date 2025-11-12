@@ -44,14 +44,15 @@ try:
 except ImportError:
     MAMMOTH_AVAILABLE = False
 
-# NOWE: PaddleOCR
+# NOWE: PaddleOCR - Import z ochroną przed reinitialization
+PADDLEOCR_AVAILABLE = False
 try:
-    from paddleocr import PaddleOCR
     import numpy as np
     from PIL import Image
+    # Lazy import - importujemy dopiero gdy potrzebne
     PADDLEOCR_AVAILABLE = True
 except ImportError:
-    PADDLEOCR_AVAILABLE = False
+    pass
 
 # ===== KONFIGURACJA =====
 
@@ -85,8 +86,8 @@ SESSION_STATE_DEFAULTS = {
     'article_groups': [],
     'next_article_index': 0,
     'file_type': None,
-    'ocr_mode': 'auto',  # NOWE: 'auto', 'force_ocr', 'native_only'
-    'ocr_language': 'pl'  # NOWE: język dla PaddleOCR
+    'ocr_mode': 'paddleocr',  # ZMIENIONE: 'paddleocr' (główny), 'auto', 'native'
+    'ocr_language': 'pl'
 }
 
 # ===== KLASY POMOCNICZE =====
@@ -104,49 +105,50 @@ class PageContent:
         if self.images is None:
             self.images = []
 
-class OCREngine:
-    """Silnik OCR z PaddleOCR"""
+# NOWE: Streamlit-cached OCR initialization (zapobiega reinitialization error)
+@st.cache_resource
+def get_ocr_engine(language: str = 'pl'):
+    """
+    Tworzy i cachuje instancję PaddleOCR
+    @st.cache_resource zapewnia że zostanie utworzona tylko raz
+    """
+    if not PADDLEOCR_AVAILABLE:
+        raise RuntimeError("PaddleOCR nie jest zainstalowany! Zainstaluj: pip install paddleocr")
     
-    _instance = None
-    _ocr = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(OCREngine, cls).__new__(cls)
-        return cls._instance
-    
-    def initialize(self, language: str = 'pl'):
-        """Inicjalizuje PaddleOCR (lazy loading)"""
-        if not PADDLEOCR_AVAILABLE:
-            raise RuntimeError("PaddleOCR nie jest zainstalowany!")
+    # Lazy import - tylko tutaj importujemy PaddleOCR
+    try:
+        from paddleocr import PaddleOCR
         
-        if self._ocr is None:
-            with st.spinner("🔄 Inicjalizacja silnika OCR..."):
-                # use_angle_cls=True - wykrywa obrót tekstu
-                # lang - język (pl, en, ch, etc.)
-                self._ocr = PaddleOCR(
-                    use_angle_cls=True,
-                    lang=language,
-                    show_log=False,
-                    use_gpu=False  # Zmień na True jeśli masz GPU
-                )
-        return self._ocr
+        # Inicjalizacja OCR
+        ocr = PaddleOCR(
+            use_angle_cls=True,  # Wykrywa obrót tekstu
+            lang=language,
+            show_log=False,
+            use_gpu=False  # Zmień na True jeśli masz GPU
+        )
+        return ocr
+    except Exception as e:
+        st.error(f"Błąd inicjalizacji PaddleOCR: {e}")
+        raise
+
+def extract_text_with_paddleocr(image_data: bytes, language: str = 'pl') -> Tuple[str, float]:
+    """
+    Wyciąga tekst z obrazu używając PaddleOCR
+    Returns: (text, average_confidence)
+    """
+    import numpy as np
+    from PIL import Image
     
-    def extract_text_from_image(self, image_data: bytes) -> Tuple[str, float]:
-        """
-        Wyciąga tekst z obrazu używając PaddleOCR
-        Returns: (text, average_confidence)
-        """
-        if self._ocr is None:
-            self.initialize()
+    try:
+        # Pobierz cached OCR engine
+        ocr = get_ocr_engine(language)
         
         # Konwertuj bytes na numpy array
-        nparr = np.frombuffer(image_data, np.uint8)
         img = Image.open(io.BytesIO(image_data))
         img_array = np.array(img)
         
         # OCR
-        result = self._ocr.ocr(img_array, cls=True)
+        result = ocr.ocr(img_array, cls=True)
         
         if not result or not result[0]:
             return "", 0.0
@@ -167,9 +169,13 @@ class OCREngine:
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
         
         return full_text, avg_confidence
+        
+    except Exception as e:
+        st.warning(f"Błąd PaddleOCR: {e}")
+        return "", 0.0
 
 class DocumentHandler:
-    """Klasa do obsługi różnych formatów dokumentów - ROZSZERZONA"""
+    """Klasa do obsługi różnych formatów dokumentów - PaddleOCR jako główny silnik"""
     
     def __init__(self, file_bytes: bytes, filename: str):
         self.file_bytes = file_bytes
@@ -177,7 +183,6 @@ class DocumentHandler:
         self.file_type = self._detect_file_type(filename)
         self._document = None
         self._html_content = None
-        self.ocr_engine = None  # NOWE: Inicjalizowane na żądanie
         self._load_document()
     
     def _detect_file_type(self, filename: str) -> str:
@@ -206,12 +211,6 @@ class DocumentHandler:
             self._html_content = result.value
             self._document = None
     
-    def _ensure_ocr_engine(self, language: str = 'pl'):
-        """Zapewnia, że silnik OCR jest zainicjalizowany"""
-        if self.ocr_engine is None:
-            self.ocr_engine = OCREngine()
-            self.ocr_engine.initialize(language)
-    
     def get_page_count(self) -> int:
         """Zwraca liczbę stron w dokumencie"""
         if self.file_type == 'pdf':
@@ -225,51 +224,69 @@ class DocumentHandler:
             return max(1, len(words) // 500 + (1 if len(words) % 500 > 0 else 0))
         return 0
     
-    def _should_use_ocr(self, native_text: str, page_index: int) -> bool:
+    def _should_use_ocr_primary(self, page_index: int) -> bool:
         """
-        INTELIGENTNA DECYZJA: Czy użyć OCR dla tej strony?
+        NOWA LOGIKA: PaddleOCR jako PRIMARY
+        Zwraca True jeśli PaddleOCR jest dostępny i nie wyłączony przez użytkownika
         """
-        ocr_mode = st.session_state.get('ocr_mode', 'auto')
+        if not PADDLEOCR_AVAILABLE:
+            return False  # Brak PaddleOCR - użyj PyMuPDF
         
-        # Force modes
-        if ocr_mode == 'force_ocr':
-            return True
-        if ocr_mode == 'native_only':
-            return False
+        ocr_mode = st.session_state.get('ocr_mode', 'paddleocr')  # Domyślnie PaddleOCR!
         
-        # AUTO mode - heurystyki
-        if not native_text or len(native_text.strip()) < NATIVE_TEXT_MIN_LENGTH:
-            return True  # Za mało tekstu = prawdopodobnie skan
+        # Tryby:
+        # - 'paddleocr': Zawsze używaj PaddleOCR (domyślny)
+        # - 'auto': Inteligentny wybór
+        # - 'native': Tylko PyMuPDF (fallback)
         
-        # Sprawdź czy to obrazowy PDF (brak warstwy tekstowej)
-        if self.file_type == 'pdf':
+        if ocr_mode == 'native':
+            return False  # Wymuszone PyMuPDF
+        
+        if ocr_mode == 'paddleocr':
+            return True  # Zawsze PaddleOCR
+        
+        # Auto mode - sprawdź czy warto użyć OCR
+        if self.file_type != 'pdf':
+            return False  # Dla DOCX/DOC używaj standardowej metody
+        
+        try:
             page = self._document.load_page(page_index)
+            native_text = page.get_text("text")
+            
+            # Jeśli za mało tekstu natywnego - użyj OCR
+            if len(native_text.strip()) < NATIVE_TEXT_MIN_LENGTH:
+                return True
+            
+            # Sprawdź czy są text blocks
             text_blocks = page.get_text("blocks")
             if not text_blocks or len(text_blocks) == 0:
                 return True
-        
-        return False
+            
+            return False  # Jest dużo natywnego tekstu - nie potrzeba OCR
+            
+        except:
+            return True  # W razie błędu - użyj OCR
     
-    def get_page_content(self, page_index: int, force_ocr: bool = False) -> PageContent:
+    def get_page_content(self, page_index: int, force_mode: str = None) -> PageContent:
         """
-        NOWA WERSJA: Zwraca zawartość strony z inteligentnym wyborem metody
+        NOWA WERSJA: PaddleOCR jako główny silnik
+        force_mode: 'paddleocr', 'native', None (use settings)
         """
         if self.file_type != 'pdf':
             # Dla DOCX/DOC używamy starej metody
             return self._get_non_pdf_content(page_index)
         
-        # === PDF - inteligentna ekstrakcja ===
+        # === PDF - PaddleOCR jako primary ===
         
-        # 1. Próba natywnej ekstrakcji
         page = self._document.load_page(page_index)
-        native_text = page.get_text("text")
         images = self._extract_images_from_pdf_page(page_index)
         
-        # 2. Decyzja o OCR
-        use_ocr = force_ocr or self._should_use_ocr(native_text, page_index)
+        # Ustal czy używać OCR
+        use_ocr = force_mode == 'paddleocr' if force_mode else self._should_use_ocr_primary(page_index)
         
         if not use_ocr or not PADDLEOCR_AVAILABLE:
-            # Zwróć natywny tekst
+            # Fallback do PyMuPDF
+            native_text = page.get_text("text")
             return PageContent(
                 page_number=page_index + 1,
                 text=native_text,
@@ -277,38 +294,49 @@ class DocumentHandler:
                 extraction_method="native"
             )
         
-        # 3. OCR - renderuj stronę jako obraz
+        # === GŁÓWNA ŚCIEŻKA: PaddleOCR ===
         try:
-            self._ensure_ocr_engine(st.session_state.get('ocr_language', 'pl'))
-            
             # Renderuj stronę w wysokiej rozdzielczości
             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
             img_bytes = pix.tobytes("png")
             
             # OCR
-            ocr_text, confidence = self.ocr_engine.extract_text_from_image(img_bytes)
+            language = st.session_state.get('ocr_language', 'pl')
+            ocr_text, confidence = extract_text_with_paddleocr(img_bytes, language)
             
-            # 4. Wybierz lepszy wynik
-            if confidence > OCR_CONFIDENCE_THRESHOLD and len(ocr_text) > len(native_text):
+            # Jeśli OCR się powiódł i ma wysoką jakość
+            if confidence > OCR_CONFIDENCE_THRESHOLD or len(ocr_text.strip()) > 50:
                 return PageContent(
                     page_number=page_index + 1,
                     text=ocr_text,
                     images=images,
-                    extraction_method="ocr",
+                    extraction_method="paddleocr",
                     ocr_confidence=confidence
                 )
             else:
-                # Jeśli OCR nie był lepszy, zostań przy natywnym
-                return PageContent(
-                    page_number=page_index + 1,
-                    text=native_text if native_text else ocr_text,
-                    images=images,
-                    extraction_method="hybrid",
-                    ocr_confidence=confidence
-                )
+                # Niska jakość OCR - spróbuj natywnego jako fallback
+                native_text = page.get_text("text")
+                if len(native_text.strip()) > len(ocr_text.strip()):
+                    return PageContent(
+                        page_number=page_index + 1,
+                        text=native_text,
+                        images=images,
+                        extraction_method="hybrid_native",
+                        ocr_confidence=confidence
+                    )
+                else:
+                    return PageContent(
+                        page_number=page_index + 1,
+                        text=ocr_text,
+                        images=images,
+                        extraction_method="paddleocr_low_conf",
+                        ocr_confidence=confidence
+                    )
                 
         except Exception as e:
+            # OCR failed - fallback do natywnego
             st.warning(f"OCR nie powiodło się dla strony {page_index + 1}: {e}")
+            native_text = page.get_text("text")
             return PageContent(
                 page_number=page_index + 1,
                 text=native_text,
@@ -887,8 +915,8 @@ async def process_batch(ai_processor: AIProcessor, start_index: int):
     tasks = []
     for i in range(start_index, end_index):
         if st.session_state.document:
-            force_ocr = (st.session_state.get('ocr_mode') == 'force_ocr')
-            page_content = st.session_state.document.get_page_content(i, force_ocr=force_ocr)
+            # Użyj ustawienia z UI (nie force)
+            page_content = st.session_state.document.get_page_content(i, force_mode=None)
             tasks.append(ai_processor.process_page(page_content))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -962,11 +990,10 @@ def run_ai_processing_loop():
             article_pages = st.session_state.article_groups[st.session_state.next_article_index]
             
             pages_content = []
-            force_ocr = (st.session_state.get('ocr_mode') == 'force_ocr')
             for page_num in article_pages:
                 if st.session_state.document and 0 <= page_num - 1 < st.session_state.total_pages:
                     pages_content.append(
-                        st.session_state.document.get_page_content(page_num - 1, force_ocr=force_ocr)
+                        st.session_state.document.get_page_content(page_num - 1, force_mode=None)
                     )
             
             article_result = asyncio.run(
@@ -1015,22 +1042,24 @@ def render_sidebar():
     with st.sidebar:
         st.header("⚙️ Konfiguracja Projektu")
         
-        # === NOWE: OCR SETTINGS ===
+        # === OCR SETTINGS - PaddleOCR jako główny silnik ===
         if PADDLEOCR_AVAILABLE:
-            with st.expander("🔍 Ustawienia OCR", expanded=False):
+            with st.expander("🔍 Silnik Ekstrakcji Tekstu (PaddleOCR)", expanded=True):
+                st.info("✨ PaddleOCR jest włączony jako główny silnik!")
+                
                 st.radio(
-                    "Tryb ekstrakcji tekstu:",
-                    options=['auto', 'force_ocr', 'native_only'],
+                    "Tryb ekstrakcji:",
+                    options=['paddleocr', 'auto', 'native'],
                     format_func=lambda x: {
+                        'paddleocr': '🔬 PaddleOCR (domyślny - najlepsza jakość)',
                         'auto': '🤖 Auto (inteligentny wybór)',
-                        'force_ocr': '🔬 Wymuś OCR (dla skanów)',
-                        'native_only': '📄 Tylko natywny (szybki)'
+                        'native': '📄 PyMuPDF (szybki - tylko natywne PDF)'
                     }[x],
                     key='ocr_mode',
                     help="""
-                    • Auto: System sam decyduje kiedy użyć OCR
-                    • Wymuś OCR: Zawsze używaj PaddleOCR (dla skanów)
-                    • Tylko natywny: Szybsza ekstrakcja bez OCR
+                    • **PaddleOCR**: Zawsze używa OCR - najlepsza jakość, działa na skanach
+                    • **Auto**: System decyduje - OCR dla skanów, PyMuPDF dla natywnych
+                    • **PyMuPDF**: Tylko dla nowoczesnych PDF z tekstem (szybkie)
                     """
                 )
                 
@@ -1049,8 +1078,20 @@ def render_sidebar():
                     }[x],
                     key='ocr_language'
                 )
+                
+                # Info o wydajności
+                current_mode = st.session_state.get('ocr_mode', 'paddleocr')
+                if current_mode == 'paddleocr':
+                    st.caption("⚡ Tryb PaddleOCR: ~5-10s na stronę (CPU)")
+                elif current_mode == 'auto':
+                    st.caption("⚡ Tryb Auto: optymalna równowaga szybkość/jakość")
+                else:
+                    st.caption("⚡ Tryb PyMuPDF: ~0.1s na stronę")
         else:
-            st.warning("⚠️ PaddleOCR niedostępny. Zainstaluj: `pip install paddleocr`")
+            with st.expander("⚠️ PaddleOCR niedostępny", expanded=True):
+                st.warning("PaddleOCR nie jest zainstalowany!")
+                st.code("pip install paddleocr", language="bash")
+                st.info("Obecnie używany jest tylko PyMuPDF (działa tylko dla natywnych PDF)")
         
         st.divider()
         
@@ -1153,14 +1194,16 @@ def render_sidebar():
             st.metric("Liczba stron", st.session_state.total_pages)
             st.caption(f"**Format:** {st.session_state.file_type.upper()}")
             
-            # NOWE: OCR status
+            # OCR status
             if PADDLEOCR_AVAILABLE:
                 ocr_mode_label = {
+                    'paddleocr': '🔬 PaddleOCR',
                     'auto': '🤖 Auto',
-                    'force_ocr': '🔬 Wymuś OCR',
-                    'native_only': '📄 Natywny'
-                }[st.session_state.get('ocr_mode', 'auto')]
-                st.caption(f"**OCR:** {ocr_mode_label}")
+                    'native': '📄 PyMuPDF'
+                }[st.session_state.get('ocr_mode', 'paddleocr')]
+                st.caption(f"**Silnik:** {ocr_mode_label}")
+            else:
+                st.caption("**Silnik:** 📄 PyMuPDF (OCR niedostępny)")
 
 def render_processing_status():
     """Renderuje status przetwarzania (bez zmian)"""
@@ -1354,21 +1397,22 @@ def render_page_view():
     with text_col:
         st.subheader("🤖 Tekst przetworzony przez AI")
         
-        # NOWE: Info o metodzie ekstrakcji
+        # Info o metodzie ekstrakcji
         extraction_method = page_content.extraction_method
         method_info = {
-            'native': '📄 Natywna ekstrakcja',
-            'ocr': '🔬 PaddleOCR',
-            'hybrid': '🔄 Hybrid (OCR + natywny)',
-            'native_fallback': '⚠️ Natywny (OCR failed)'
+            'native': '📄 PyMuPDF (natywna ekstrakcja)',
+            'paddleocr': '🔬 PaddleOCR (OCR - najlepsza jakość)',
+            'paddleocr_low_conf': '🔬 PaddleOCR (niska pewność)',
+            'hybrid_native': '🔄 Hybrid (natywny wybrany)',
+            'native_fallback': '⚠️ PyMuPDF (OCR failed)'
         }.get(extraction_method, extraction_method)
         
         st.caption(f"**Metoda ekstrakcji:** {method_info}")
         
-        if extraction_method in ['ocr', 'hybrid'] and page_content.ocr_confidence > 0:
+        if extraction_method.startswith('paddleocr') and page_content.ocr_confidence > 0:
             confidence_percent = page_content.ocr_confidence * 100
             confidence_color = 'green' if confidence_percent > 80 else 'orange' if confidence_percent > 60 else 'red'
-            st.caption(f"**OCR Confidence:** :{confidence_color}[{confidence_percent:.1f}%]")
+            st.caption(f"**Pewność OCR:** :{confidence_color}[{confidence_percent:.1f}%]")
         
         with st.expander("👁️ Pokaż surowy tekst wejściowy"):
             st.text_area(
@@ -1573,7 +1617,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("🚀 Redaktor AI - Procesor Dokumentów + PaddleOCR")
+    st.title("🚀 Redaktor AI - Procesor Dokumentów (PaddleOCR)")
     
     init_session_state()
     
@@ -1583,12 +1627,16 @@ def main():
         missing.append("DOCX (zainstaluj: pip install python-docx)")
     if not MAMMOTH_AVAILABLE:
         missing.append("DOC (zainstaluj: pip install mammoth)")
+    
     if not PADDLEOCR_AVAILABLE:
-        missing.append("⚠️ PaddleOCR (zainstaluj: pip install paddleocr) - ZALECANE!")
+        st.error("⚠️ **PaddleOCR nie jest zainstalowany!**")
+        st.warning("PaddleOCR jest GŁÓWNYM silnikiem tej aplikacji. Bez niego działa tylko podstawowa ekstrakcja PyMuPDF.")
+        st.code("pip install paddleocr", language="bash")
+        st.info("💡 Po instalacji odśwież stronę (Ctrl+R)")
     
     if missing:
         with st.sidebar:
-            with st.expander("⚠️ Brakujące biblioteki", expanded=False):
+            with st.expander("⚠️ Opcjonalne biblioteki", expanded=False):
                 for fmt in missing:
                     st.write(f"- {fmt}")
     
@@ -1605,20 +1653,30 @@ def main():
             
             with st.expander("📖 Jak korzystać z aplikacji?"):
                 st.markdown("""
-                ### Tryby przetwarzania:
+                ### 🔬 PaddleOCR jako Główny Silnik
+                
+                Ta aplikacja używa **PaddleOCR** jako głównego mechanizmu ekstrakcji tekstu!
+                
+                **Zalety:**
+                - ✅ Działa na skanach i zdjęciach dokumentów
+                - ✅ Wykrywa tekst w obrazach
+                - ✅ Obsługuje 80+ języków
+                - ✅ Rozpoznaje skomplikowane layouty
+                
+                ### Tryby Ekstrakcji:
+                
+                1. **🔬 PaddleOCR (domyślny)** - Zawsze używa OCR, najlepsza jakość
+                2. **🤖 Auto** - Inteligentny wybór: OCR dla skanów, PyMuPDF dla natywnych PDF
+                3. **📄 PyMuPDF** - Tylko natywna ekstrakcja (szybkie, ale nie działa na skanach)
+                
+                ### Tryby Przetwarzania:
                 
                 1. **Cały dokument** - Przetwarza każdą stronę osobno
                 2. **Zakres stron** - Przetwarza wybrany zakres
                 3. **Artykuł wielostronicowy** - Łączy strony w jeden artykuł
                 
-                ### 🆕 Integracja PaddleOCR:
-                
-                - **🤖 Auto** - System sam decyduje kiedy użyć OCR
-                - **🔬 Wymuś OCR** - Zawsze używaj dla dokumentów skanowanych
-                - **📄 Tylko natywny** - Szybka ekstrakcja bez OCR
-                
                 ### Obsługiwane formaty:
-                - PDF (z OCR dla skanów!)
+                - PDF (wszystkie - natywne i skany!)
                 - DOCX (Microsoft Word)
                 - DOC (starsze pliki Word)
                 
@@ -1627,9 +1685,14 @@ def main():
                 - ✅ Wyciąganie grafik ze stron
                 - ✅ Generowanie meta tagów SEO
                 - ✅ Eksport do HTML
-                - ✅ **NOWE: Inteligentne OCR dla skanów**
-                - ✅ **NOWE: Obsługa wielu języków**
-                - ✅ **NOWE: Wykrywanie jakości tekstu**
+                - ✅ **OCR dla skanów i zdjęć**
+                - ✅ **Obsługa wielu języków**
+                - ✅ **Wykrywanie jakości tekstu**
+                
+                ### 💡 Wskazówki:
+                - Dla **skanów**: użyj trybu PaddleOCR (domyślny)
+                - Dla **nowoczesnych PDF**: możesz użyć PyMuPDF (szybsze)
+                - Nie wiesz?: zostaw Auto
                 """)
         return
     
