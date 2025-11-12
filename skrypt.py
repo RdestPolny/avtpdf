@@ -1,17 +1,21 @@
 """
-Redaktor AI - Interaktywny Procesor Dokumentów
-===============================================
+Redaktor AI - Interaktywny Procesor Dokumentów z PaddleOCR
+===========================================================
 
 INSTALACJA ZALEŻNOŚCI:
 ----------------------
-pip uninstall docx  # WAŻNE: Usuń złą bibliotekę jeśli jest zainstalowana!
+# Podstawowe (jak dotychczas)
+pip uninstall docx
 pip install streamlit PyMuPDF openai python-docx mammoth
 
-MINIMALNA KONFIGURACJA (tylko PDF):
-pip install streamlit PyMuPDF openai
+# NOWE: PaddleOCR (opcjonalne, ale MOCNO zalecane)
+pip install paddlepaddle paddleocr
+
+# Jeśli masz GPU (znacznie szybsze):
+pip install paddlepaddle-gpu paddleocr
 
 URUCHOMIENIE:
-streamlit run skrypt.py
+streamlit run redaktor_ai_enhanced.py
 """
 
 import streamlit as st
@@ -23,10 +27,11 @@ import json
 from pathlib import Path
 import re
 import asyncio
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
+import base64
 
-# Opcjonalne importy - aplikacja będzie działać bez nich (tylko PDF)
+# Opcjonalne importy
 try:
     from docx import Document as DocxDocument
     DOCX_AVAILABLE = True
@@ -39,12 +44,25 @@ try:
 except ImportError:
     MAMMOTH_AVAILABLE = False
 
+# NOWE: PaddleOCR
+try:
+    from paddleocr import PaddleOCR
+    import numpy as np
+    from PIL import Image
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PADDLEOCR_AVAILABLE = False
+
 # ===== KONFIGURACJA =====
 
 PROJECTS_DIR = Path("pdf_processor_projects")
 BATCH_SIZE = 10
 MAX_RETRIES = 3
 DEFAULT_MODEL = 'gpt-4o-mini'
+
+# NOWE: Konfiguracja OCR
+OCR_CONFIDENCE_THRESHOLD = 0.6  # Minimalny confidence dla PaddleOCR
+NATIVE_TEXT_MIN_LENGTH = 50     # Minimalna długość tekstu z PyMuPDF, żeby uznać za OK
 
 SESSION_STATE_DEFAULTS = {
     'processing_status': 'idle',
@@ -66,7 +84,9 @@ SESSION_STATE_DEFAULTS = {
     'article_page_groups_input': '',
     'article_groups': [],
     'next_article_index': 0,
-    'file_type': None
+    'file_type': None,
+    'ocr_mode': 'auto',  # NOWE: 'auto', 'force_ocr', 'native_only'
+    'ocr_language': 'pl'  # NOWE: język dla PaddleOCR
 }
 
 # ===== KLASY POMOCNICZE =====
@@ -77,13 +97,79 @@ class PageContent:
     page_number: int
     text: str
     images: List[Dict] = None
+    extraction_method: str = "native"  # NOWE: 'native', 'ocr', 'hybrid'
+    ocr_confidence: float = 0.0  # NOWE: średni confidence z OCR
     
     def __post_init__(self):
         if self.images is None:
             self.images = []
 
+class OCREngine:
+    """Silnik OCR z PaddleOCR"""
+    
+    _instance = None
+    _ocr = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(OCREngine, cls).__new__(cls)
+        return cls._instance
+    
+    def initialize(self, language: str = 'pl'):
+        """Inicjalizuje PaddleOCR (lazy loading)"""
+        if not PADDLEOCR_AVAILABLE:
+            raise RuntimeError("PaddleOCR nie jest zainstalowany!")
+        
+        if self._ocr is None:
+            with st.spinner("🔄 Inicjalizacja silnika OCR..."):
+                # use_angle_cls=True - wykrywa obrót tekstu
+                # lang - język (pl, en, ch, etc.)
+                self._ocr = PaddleOCR(
+                    use_angle_cls=True,
+                    lang=language,
+                    show_log=False,
+                    use_gpu=False  # Zmień na True jeśli masz GPU
+                )
+        return self._ocr
+    
+    def extract_text_from_image(self, image_data: bytes) -> Tuple[str, float]:
+        """
+        Wyciąga tekst z obrazu używając PaddleOCR
+        Returns: (text, average_confidence)
+        """
+        if self._ocr is None:
+            self.initialize()
+        
+        # Konwertuj bytes na numpy array
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = Image.open(io.BytesIO(image_data))
+        img_array = np.array(img)
+        
+        # OCR
+        result = self._ocr.ocr(img_array, cls=True)
+        
+        if not result or not result[0]:
+            return "", 0.0
+        
+        # Parsuj wyniki
+        texts = []
+        confidences = []
+        
+        for line in result[0]:
+            if line:
+                # Struktura: [bbox, (text, confidence)]
+                text = line[1][0]
+                confidence = line[1][1]
+                texts.append(text)
+                confidences.append(confidence)
+        
+        full_text = "\n".join(texts)
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        
+        return full_text, avg_confidence
+
 class DocumentHandler:
-    """Klasa do obsługi różnych formatów dokumentów"""
+    """Klasa do obsługi różnych formatów dokumentów - ROZSZERZONA"""
     
     def __init__(self, file_bytes: bytes, filename: str):
         self.file_bytes = file_bytes
@@ -91,6 +177,7 @@ class DocumentHandler:
         self.file_type = self._detect_file_type(filename)
         self._document = None
         self._html_content = None
+        self.ocr_engine = None  # NOWE: Inicjalizowane na żądanie
         self._load_document()
     
     def _detect_file_type(self, filename: str) -> str:
@@ -119,6 +206,12 @@ class DocumentHandler:
             self._html_content = result.value
             self._document = None
     
+    def _ensure_ocr_engine(self, language: str = 'pl'):
+        """Zapewnia, że silnik OCR jest zainicjalizowany"""
+        if self.ocr_engine is None:
+            self.ocr_engine = OCREngine()
+            self.ocr_engine.initialize(language)
+    
     def get_page_count(self) -> int:
         """Zwraca liczbę stron w dokumencie"""
         if self.file_type == 'pdf':
@@ -132,14 +225,100 @@ class DocumentHandler:
             return max(1, len(words) // 500 + (1 if len(words) % 500 > 0 else 0))
         return 0
     
-    def get_page_content(self, page_index: int) -> PageContent:
-        """Zwraca zawartość pojedynczej strony"""
+    def _should_use_ocr(self, native_text: str, page_index: int) -> bool:
+        """
+        INTELIGENTNA DECYZJA: Czy użyć OCR dla tej strony?
+        """
+        ocr_mode = st.session_state.get('ocr_mode', 'auto')
+        
+        # Force modes
+        if ocr_mode == 'force_ocr':
+            return True
+        if ocr_mode == 'native_only':
+            return False
+        
+        # AUTO mode - heurystyki
+        if not native_text or len(native_text.strip()) < NATIVE_TEXT_MIN_LENGTH:
+            return True  # Za mało tekstu = prawdopodobnie skan
+        
+        # Sprawdź czy to obrazowy PDF (brak warstwy tekstowej)
         if self.file_type == 'pdf':
             page = self._document.load_page(page_index)
-            text = page.get_text("text")
-            images = self._extract_images_from_pdf_page(page_index)
-            return PageContent(page_index + 1, text, images)
-        elif self.file_type == 'docx':
+            text_blocks = page.get_text("blocks")
+            if not text_blocks or len(text_blocks) == 0:
+                return True
+        
+        return False
+    
+    def get_page_content(self, page_index: int, force_ocr: bool = False) -> PageContent:
+        """
+        NOWA WERSJA: Zwraca zawartość strony z inteligentnym wyborem metody
+        """
+        if self.file_type != 'pdf':
+            # Dla DOCX/DOC używamy starej metody
+            return self._get_non_pdf_content(page_index)
+        
+        # === PDF - inteligentna ekstrakcja ===
+        
+        # 1. Próba natywnej ekstrakcji
+        page = self._document.load_page(page_index)
+        native_text = page.get_text("text")
+        images = self._extract_images_from_pdf_page(page_index)
+        
+        # 2. Decyzja o OCR
+        use_ocr = force_ocr or self._should_use_ocr(native_text, page_index)
+        
+        if not use_ocr or not PADDLEOCR_AVAILABLE:
+            # Zwróć natywny tekst
+            return PageContent(
+                page_number=page_index + 1,
+                text=native_text,
+                images=images,
+                extraction_method="native"
+            )
+        
+        # 3. OCR - renderuj stronę jako obraz
+        try:
+            self._ensure_ocr_engine(st.session_state.get('ocr_language', 'pl'))
+            
+            # Renderuj stronę w wysokiej rozdzielczości
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+            img_bytes = pix.tobytes("png")
+            
+            # OCR
+            ocr_text, confidence = self.ocr_engine.extract_text_from_image(img_bytes)
+            
+            # 4. Wybierz lepszy wynik
+            if confidence > OCR_CONFIDENCE_THRESHOLD and len(ocr_text) > len(native_text):
+                return PageContent(
+                    page_number=page_index + 1,
+                    text=ocr_text,
+                    images=images,
+                    extraction_method="ocr",
+                    ocr_confidence=confidence
+                )
+            else:
+                # Jeśli OCR nie był lepszy, zostań przy natywnym
+                return PageContent(
+                    page_number=page_index + 1,
+                    text=native_text if native_text else ocr_text,
+                    images=images,
+                    extraction_method="hybrid",
+                    ocr_confidence=confidence
+                )
+                
+        except Exception as e:
+            st.warning(f"OCR nie powiodło się dla strony {page_index + 1}: {e}")
+            return PageContent(
+                page_number=page_index + 1,
+                text=native_text,
+                images=images,
+                extraction_method="native_fallback"
+            )
+    
+    def _get_non_pdf_content(self, page_index: int) -> PageContent:
+        """Stara metoda dla DOCX/DOC"""
+        if self.file_type == 'docx':
             return self._get_docx_page_content(page_index)
         elif self.file_type == 'doc':
             return self._get_doc_page_content(page_index)
@@ -226,7 +405,7 @@ class DocumentHandler:
             st.error(f"Błąd podczas renderowania strony {page_index + 1}: {e}")
             return None
 
-# ===== LOGIKA AI =====
+# ===== LOGIKA AI (bez zmian, skopiowana) =====
 
 class AIProcessor:
     """Klasa obsługująca komunikację z OpenAI API"""
@@ -246,6 +425,7 @@ ZASADA NADRZĘDNA: WIERNOŚĆ TREŚCI, ELASTYCZNOŚĆ FORMY.
 INSTRUKCJE SPECJALNE:
 1. Ignoruj i pomijaj numery stron oraz rozstrzelone daty.
 2. Etykiety jak "NEWS FLASH" używaj jako kontekstu, ale nie umieszczaj ich w finalnym tekście.
+3. Jeśli tekst zawiera błędy OCR lub dziwne znaki, spróbuj je poprawić w kontekście.
 
 DOZWOLONE MODYFIKACJE STRUKTURALNE:
 1. Tytuł Główny: `# Tytuł`
@@ -316,7 +496,11 @@ FORMAT ODPOWIEDZI:
     
     async def process_page(self, page_content: PageContent) -> Dict:
         """Przetwarza pojedynczą stronę"""
-        page_data = {"page_number": page_content.page_number}
+        page_data = {
+            "page_number": page_content.page_number,
+            "extraction_method": page_content.extraction_method,  # NOWE
+            "ocr_confidence": page_content.ocr_confidence  # NOWE
+        }
         
         if len(page_content.text.split()) < 20:
             page_data["type"] = "pominięta"
@@ -381,7 +565,7 @@ FORMAT ODPOWIEDZI:
         prompt = self.get_meta_tags_prompt()
         return await self.process_text(article_text[:4000], prompt, max_tokens=200)
 
-# ===== FUNKCJE POMOCNICZE =====
+# ===== FUNKCJE POMOCNICZE (bez zmian) =====
 
 def markdown_to_html(text: str) -> str:
     """Konwertuje markdown na HTML"""
@@ -404,10 +588,7 @@ def markdown_to_html(text: str) -> str:
     return ''.join(html_content)
 
 def markdown_to_clean_html(markdown_text: str, page_number: int = None) -> str:
-    """
-    Konwertuje markdown na czysty HTML bez stylowania
-    Tylko struktura: h1, h2, h3, h4, p, strong, hr
-    """
+    """Konwertuje markdown na czysty HTML bez stylowania"""
     html = markdown_text
     
     html = html.replace('\n---\n', '\n<hr>\n')
@@ -437,9 +618,7 @@ def markdown_to_clean_html(markdown_text: str, page_number: int = None) -> str:
     return '\n'.join(formatted_paragraphs)
 
 def generate_full_html_document(content: str, title: str = "Artykuł", meta_title: str = None, meta_description: str = None) -> str:
-    """
-    Generuje pełny dokument HTML z czystą strukturą (bez CSS)
-    """
+    """Generuje pełny dokument HTML z czystą strukturą"""
     meta_tags = ""
     if meta_title:
         meta_tags += f'    <meta name="title" content="{meta_title}">\n'
@@ -461,9 +640,7 @@ def generate_full_html_document(content: str, title: str = "Artykuł", meta_titl
     return html_doc
 
 def get_article_html_from_page(page_index: int) -> Optional[Dict]:
-    """
-    Pobiera czysty HTML artykułu dla danej strony
-    """
+    """Pobiera czysty HTML artykułu dla danej strony"""
     page_result = st.session_state.extracted_pages[page_index]
     
     if not page_result or page_result.get('type') != 'artykuł':
@@ -585,7 +762,7 @@ def parse_page_groups(input_text: str, total_pages: int) -> List[List[int]]:
     
     return groups
 
-# ===== ZARZĄDZANIE PROJEKTAMI =====
+# ===== ZARZĄDZANIE PROJEKTAMI (bez zmian) =====
 
 def ensure_projects_dir() -> bool:
     """Tworzy katalog projektów jeśli nie istnieje"""
@@ -710,7 +887,8 @@ async def process_batch(ai_processor: AIProcessor, start_index: int):
     tasks = []
     for i in range(start_index, end_index):
         if st.session_state.document:
-            page_content = st.session_state.document.get_page_content(i)
+            force_ocr = (st.session_state.get('ocr_mode') == 'force_ocr')
+            page_content = st.session_state.document.get_page_content(i, force_ocr=force_ocr)
             tasks.append(ai_processor.process_page(page_content))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -743,7 +921,6 @@ def start_ai_processing():
             st.session_state.next_article_index = 0
             st.session_state.processing_status = 'in_progress'
             
-            # Automatycznie przejdź do pierwszej strony pierwszego artykułu
             if groups:
                 st.session_state.current_page = groups[0][0] - 1
             
@@ -769,7 +946,6 @@ def start_ai_processing():
         st.session_state.next_batch_start_index = start_idx
         st.session_state.processing_end_page_index = end_idx
         
-        # Automatycznie przejdź do pierwszej przetwarzanej strony
         st.session_state.current_page = start_idx
 
 def run_ai_processing_loop():
@@ -786,10 +962,11 @@ def run_ai_processing_loop():
             article_pages = st.session_state.article_groups[st.session_state.next_article_index]
             
             pages_content = []
+            force_ocr = (st.session_state.get('ocr_mode') == 'force_ocr')
             for page_num in article_pages:
                 if st.session_state.document and 0 <= page_num - 1 < st.session_state.total_pages:
                     pages_content.append(
-                        st.session_state.document.get_page_content(page_num - 1)
+                        st.session_state.document.get_page_content(page_num - 1, force_ocr=force_ocr)
                     )
             
             article_result = asyncio.run(
@@ -834,10 +1011,50 @@ def init_session_state():
             st.session_state[key] = value
 
 def render_sidebar():
-    """Renderuje panel boczny"""
+    """Renderuje panel boczny - ROZSZERZONY"""
     with st.sidebar:
         st.header("⚙️ Konfiguracja Projektu")
         
+        # === NOWE: OCR SETTINGS ===
+        if PADDLEOCR_AVAILABLE:
+            with st.expander("🔍 Ustawienia OCR", expanded=False):
+                st.radio(
+                    "Tryb ekstrakcji tekstu:",
+                    options=['auto', 'force_ocr', 'native_only'],
+                    format_func=lambda x: {
+                        'auto': '🤖 Auto (inteligentny wybór)',
+                        'force_ocr': '🔬 Wymuś OCR (dla skanów)',
+                        'native_only': '📄 Tylko natywny (szybki)'
+                    }[x],
+                    key='ocr_mode',
+                    help="""
+                    • Auto: System sam decyduje kiedy użyć OCR
+                    • Wymuś OCR: Zawsze używaj PaddleOCR (dla skanów)
+                    • Tylko natywny: Szybsza ekstrakcja bez OCR
+                    """
+                )
+                
+                st.selectbox(
+                    "Język dokumentu:",
+                    options=['pl', 'en', 'de', 'fr', 'es', 'it', 'ch_sim', 'ru'],
+                    format_func=lambda x: {
+                        'pl': '🇵🇱 Polski',
+                        'en': '🇬🇧 Angielski',
+                        'de': '🇩🇪 Niemiecki',
+                        'fr': '🇫🇷 Francuski',
+                        'es': '🇪🇸 Hiszpański',
+                        'it': '🇮🇹 Włoski',
+                        'ch_sim': '🇨🇳 Chiński (uproszczony)',
+                        'ru': '🇷🇺 Rosyjski'
+                    }[x],
+                    key='ocr_language'
+                )
+        else:
+            st.warning("⚠️ PaddleOCR niedostępny. Zainstaluj: `pip install paddleocr`")
+        
+        st.divider()
+        
+        # Reszta bez zmian...
         projects = get_existing_projects()
         selected_project = st.selectbox(
             "Wybierz istniejący projekt",
@@ -900,7 +1117,7 @@ def render_sidebar():
                 )
             
             elif st.session_state.processing_mode == 'article':
-                st.info("Podaj grupy stron dla artykułów wielostronicowych. Każda grupa zostanie przetworzona w jednym zapytaniu do AI.")
+                st.info("Podaj grupy stron dla artykułów wielostronicowych.")
                 st.text_area(
                     "Zakresy stron artykułów (np. 1-3; 5,6)",
                     key='article_page_groups_input',
@@ -935,9 +1152,18 @@ def render_sidebar():
             st.info(f"**Projekt:** {st.session_state.project_name}")
             st.metric("Liczba stron", st.session_state.total_pages)
             st.caption(f"**Format:** {st.session_state.file_type.upper()}")
+            
+            # NOWE: OCR status
+            if PADDLEOCR_AVAILABLE:
+                ocr_mode_label = {
+                    'auto': '🤖 Auto',
+                    'force_ocr': '🔬 Wymuś OCR',
+                    'native_only': '📄 Natywny'
+                }[st.session_state.get('ocr_mode', 'auto')]
+                st.caption(f"**OCR:** {ocr_mode_label}")
 
 def render_processing_status():
-    """Renderuje status przetwarzania"""
+    """Renderuje status przetwarzania (bez zmian)"""
     if st.session_state.processing_status == 'idle' or not st.session_state.document:
         return
     
@@ -951,7 +1177,6 @@ def render_processing_status():
         if st.session_state.processing_status == 'complete':
             st.success(f"✅ Przetwarzanie zakończone! Przetworzono {total_groups} artykuł(ów).")
             
-            # Przycisk szybkiej nawigacji do pierwszego artykułu
             if st.session_state.article_groups:
                 if st.button("📖 Przejdź do pierwszego artykułu", type="secondary"):
                     st.session_state.current_page = st.session_state.article_groups[0][0] - 1
@@ -965,7 +1190,6 @@ def render_processing_status():
         if st.session_state.processing_status == 'complete':
             st.success("✅ Przetwarzanie zakończone!")
             
-            # Przyciski szybkiej nawigacji do zakresu
             if st.session_state.processing_mode == 'range':
                 nav_button_cols = st.columns(2)
                 if nav_button_cols[0].button("📖 Przejdź do początku zakresu", type="secondary"):
@@ -1007,18 +1231,16 @@ def render_processing_status():
             )
 
 def render_navigation():
-    """Renderuje nawigację między stronami"""
+    """Renderuje nawigację (bez zmian z poprzedniej wersji)"""
     if st.session_state.total_pages <= 1:
         return
     
     st.subheader("📖 Nawigacja")
     
-    # Informacja o zakresie przetwarzania
     if st.session_state.processing_mode == 'range':
         processing_range = f"{st.session_state.start_page}-{st.session_state.end_page}"
         st.info(f"🎯 Przetwarzany zakres: strony {processing_range}")
         
-        # Przyciski szybkiej nawigacji
         nav_cols = st.columns(3)
         if nav_cols[0].button("⏮️ Początek zakresu", use_container_width=True):
             st.session_state.current_page = st.session_state.start_page - 1
@@ -1035,7 +1257,6 @@ def render_navigation():
     elif st.session_state.processing_mode == 'article' and st.session_state.article_groups:
         st.info(f"🎯 Liczba artykułów: {len(st.session_state.article_groups)}")
         
-        # Przyciski nawigacji do artykułów
         article_nav_cols = st.columns(min(len(st.session_state.article_groups), 5))
         for idx, group in enumerate(st.session_state.article_groups[:5]):
             label = f"Art. {idx+1}"
@@ -1053,7 +1274,6 @@ def render_navigation():
         
         st.divider()
     
-    # Standardowa nawigacja
     c1, c2, c3 = st.columns([1, 2, 1])
     
     if c1.button(
@@ -1074,7 +1294,6 @@ def render_navigation():
         st.session_state.current_page += 1
         st.rerun()
     
-    # Slider nawigacji
     new_page = st.slider(
         "Przejdź do strony:",
         1,
@@ -1087,7 +1306,7 @@ def render_navigation():
         st.rerun()
 
 def render_page_view():
-    """Renderuje widok strony"""
+    """Renderuje widok strony - ROZSZERZONY"""
     st.divider()
     
     page_index = st.session_state.current_page
@@ -1135,6 +1354,22 @@ def render_page_view():
     with text_col:
         st.subheader("🤖 Tekst przetworzony przez AI")
         
+        # NOWE: Info o metodzie ekstrakcji
+        extraction_method = page_content.extraction_method
+        method_info = {
+            'native': '📄 Natywna ekstrakcja',
+            'ocr': '🔬 PaddleOCR',
+            'hybrid': '🔄 Hybrid (OCR + natywny)',
+            'native_fallback': '⚠️ Natywny (OCR failed)'
+        }.get(extraction_method, extraction_method)
+        
+        st.caption(f"**Metoda ekstrakcji:** {method_info}")
+        
+        if extraction_method in ['ocr', 'hybrid'] and page_content.ocr_confidence > 0:
+            confidence_percent = page_content.ocr_confidence * 100
+            confidence_color = 'green' if confidence_percent > 80 else 'orange' if confidence_percent > 60 else 'red'
+            st.caption(f"**OCR Confidence:** :{confidence_color}[{confidence_percent:.1f}%]")
+        
         with st.expander("👁️ Pokaż surowy tekst wejściowy"):
             st.text_area(
                 "Surowy tekst",
@@ -1171,7 +1406,7 @@ def render_page_view():
                 unsafe_allow_html=True
             )
             
-            # PRZYCISKI AKCJI
+            # Przyciski akcji
             action_cols = st.columns(3)
             
             if action_cols[0].button(
@@ -1195,7 +1430,6 @@ def render_page_view():
             ):
                 handle_meta_tag_generation(page_index, page_result['raw_markdown'])
             
-            # Checkbox do pokazywania HTML
             show_html = action_cols[2].checkbox(
                 "📄 Pokaż HTML",
                 key=f"show_html_checkbox_{page_index}",
@@ -1203,7 +1437,6 @@ def render_page_view():
                 help="Pokaż i pobierz czysty HTML artykułu"
             )
             
-            # WYŚWIETLENIE HTML JEŚLI CHECKBOX ZAZNACZONY
             if show_html and allow_meta:
                 html_data = get_article_html_from_page(page_index)
                 
@@ -1213,7 +1446,6 @@ def render_page_view():
                     with st.expander("📄 Czysty HTML artykułu", expanded=True):
                         st.caption(f"**{html_data['title']}**")
                         
-                        # Taby dla różnych widoków
                         tab1, tab2 = st.tabs(["💻 Kod HTML (zawartość)", "📰 Pełny dokument HTML"])
                         
                         with tab1:
@@ -1243,7 +1475,6 @@ def render_page_view():
                         if html_data['meta_title'] or html_data['meta_description']:
                             st.info("ℹ️ Ten HTML zawiera wygenerowane meta tagi SEO")
             
-            # META TAGI
             if page_index in st.session_state.meta_tags:
                 tags = st.session_state.meta_tags[page_index]
                 
@@ -1311,7 +1542,7 @@ def handle_meta_tag_generation(page_index: int, raw_markdown: str):
 def main():
     st.set_page_config(
         layout="wide",
-        page_title="Redaktor AI - Procesor Dokumentów",
+        page_title="Redaktor AI - Procesor Dokumentów + OCR",
         page_icon="🚀"
     )
     
@@ -1342,20 +1573,22 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("🚀 Redaktor AI - Interaktywny Procesor Dokumentów")
+    st.title("🚀 Redaktor AI - Procesor Dokumentów + PaddleOCR")
     
     init_session_state()
     
-    if not DOCX_AVAILABLE or not MAMMOTH_AVAILABLE:
-        missing = []
-        if not DOCX_AVAILABLE:
-            missing.append("DOCX (zainstaluj: pip install python-docx)")
-        if not MAMMOTH_AVAILABLE:
-            missing.append("DOC (zainstaluj: pip install mammoth)")
-        
+    # Warnings o brakujących bibliotekach
+    missing = []
+    if not DOCX_AVAILABLE:
+        missing.append("DOCX (zainstaluj: pip install python-docx)")
+    if not MAMMOTH_AVAILABLE:
+        missing.append("DOC (zainstaluj: pip install mammoth)")
+    if not PADDLEOCR_AVAILABLE:
+        missing.append("⚠️ PaddleOCR (zainstaluj: pip install paddleocr) - ZALECANE!")
+    
+    if missing:
         with st.sidebar:
-            with st.expander("⚠️ Ograniczona funkcjonalność", expanded=False):
-                st.warning("Niektóre formaty plików nie są dostępne:")
+            with st.expander("⚠️ Brakujące biblioteki", expanded=False):
                 for fmt in missing:
                     st.write(f"- {fmt}")
     
@@ -1374,22 +1607,29 @@ def main():
                 st.markdown("""
                 ### Tryby przetwarzania:
                 
-                1. **Cały dokument** - Przetwarza każdą stronę osobno, jedno zapytanie na stronę
-                2. **Zakres stron** - Przetwarza wybrany zakres stron osobno
-                3. **Artykuł wielostronicowy** - Łączy wybrane strony i przetwarza jako jeden artykuł w jednym zapytaniu
+                1. **Cały dokument** - Przetwarza każdą stronę osobno
+                2. **Zakres stron** - Przetwarza wybrany zakres
+                3. **Artykuł wielostronicowy** - Łączy strony w jeden artykuł
+                
+                ### 🆕 Integracja PaddleOCR:
+                
+                - **🤖 Auto** - System sam decyduje kiedy użyć OCR
+                - **🔬 Wymuś OCR** - Zawsze używaj dla dokumentów skanowanych
+                - **📄 Tylko natywny** - Szybka ekstrakcja bez OCR
                 
                 ### Obsługiwane formaty:
-                - PDF (z podglądem i wyciąganiem grafik)
+                - PDF (z OCR dla skanów!)
                 - DOCX (Microsoft Word)
                 - DOC (starsze pliki Word)
                 
                 ### Funkcje:
-                - Zapisywanie i ładowanie projektów
-                - Wyciąganie grafik ze stron
-                - Generowanie meta tagów SEO
-                - **Eksport do HTML** - czysty HTML bez stylowania
-                - Ponowne przetwarzanie stron z kontekstem
-                - **Automatyczna nawigacja** - przejście do zakresu po rozpoczęciu
+                - ✅ Zapisywanie i ładowanie projektów
+                - ✅ Wyciąganie grafik ze stron
+                - ✅ Generowanie meta tagów SEO
+                - ✅ Eksport do HTML
+                - ✅ **NOWE: Inteligentne OCR dla skanów**
+                - ✅ **NOWE: Obsługa wielu języków**
+                - ✅ **NOWE: Wykrywanie jakości tekstu**
                 """)
         return
     
