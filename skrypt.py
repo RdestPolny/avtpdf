@@ -885,8 +885,15 @@ def handle_file_upload(uploaded_file):
                 st.session_state.project_loaded_and_waiting_for_file = False
                 st.success("✅ Plik pomyślnie dopasowany do projektu.")
             else:
+                # NAPRAWIONE: Nie resetuj kluczy widgetów!
+                # Lista kluczy które są używane przez widgety i nie mogą być resetowane
+                WIDGET_KEYS = {
+                    'api_key', 'ocr_mode', 'ocr_language', 'processing_mode',
+                    'start_page', 'end_page', 'article_page_groups_input'
+                }
+                
                 for key, value in SESSION_STATE_DEFAULTS.items():
-                    if key != 'api_key':
+                    if key not in WIDGET_KEYS:  # Pomijamy klucze widgetów
                         st.session_state[key] = value
                 
                 st.session_state.document = document
@@ -1130,16 +1137,37 @@ def render_sidebar():
             st.divider()
             st.subheader("🤖 Opcje Przetwarzania")
             
+            # NOWY: Smart tip dla magazynów
+            if st.session_state.file_type == 'pdf' and st.session_state.total_pages > 5:
+                with st.expander("💡 Wskazówka: Przetwarzanie magazynów", expanded=True):
+                    st.markdown("""
+                    **Czy to skan magazynu/czasopisma?**
+                    
+                    👉 Użyj trybu **"Artykuł wielostronicowy"** poniżej!
+                    
+                    **Przykład:**
+                    - Artykuł 1: strony 2-4 → wpisz `2-4`
+                    - Artykuł 2: strony 6-8 → wpisz `6-8`
+                    - Artykuł 3: strony 10-13 → wpisz `10-13`
+                    
+                    Każdy artykuł zostanie przetworzony jako całość w jednym zapytaniu!
+                    """)
+            
             st.radio(
                 "Wybierz tryb:",
                 ('all', 'range', 'article'),
                 captions=[
-                    "Cały dokument (strona po stronie)",
-                    "Zakres stron (strona po stronie)",
-                    "Artykuł wielostronicowy (jedno zapytanie)"
+                    "Cały dokument (każda strona osobno)",
+                    "Zakres stron (każda strona osobno)",
+                    "📰 Artykuł wielostronicowy (POLECANE dla magazynów!)"
                 ],
                 key='processing_mode',
-                horizontal=False
+                horizontal=False,
+                help="""
+                **Artykuł wielostronicowy** - Idealny dla skanów magazynów/czasopism!
+                Łączy wybrane strony w jeden artykuł w jednym zapytaniu do AI.
+                Np. artykuł na stronach 2-4 zostanie przetworzony jako całość.
+                """
             )
             
             if st.session_state.processing_mode == 'range':
@@ -1158,12 +1186,21 @@ def render_sidebar():
                 )
             
             elif st.session_state.processing_mode == 'article':
-                st.info("Podaj grupy stron dla artykułów wielostronicowych.")
+                st.success("✨ **Tryb dla magazynów!** Podaj zakresy stron dla każdego artykułu.")
+                st.info("""
+                **Przykład dla magazynu:**
+                - Artykuł 1 na str. 2-4 → wpisz: `2-4`
+                - Artykuł 2 na str. 6-8 → wpisz: `6-8`
+                - Artykuł 3 na str. 10,11,13 → wpisz: `10,11,13`
+                
+                Każda linia = jeden artykuł!
+                """)
                 st.text_area(
-                    "Zakresy stron artykułów (np. 1-3; 5,6)",
+                    "Zakresy stron artykułów (jeden artykuł na linię)",
                     key='article_page_groups_input',
-                    placeholder="1-3\n5,6\n8-10",
-                    height=100
+                    placeholder="2-4\n6-8\n10-13\n15,16,18",
+                    height=120,
+                    help="Każda linia to osobny artykuł. Używaj zakresów (2-4) lub pojedynczych stron oddzielonych przecinkami (10,11,13)"
                 )
             
             st.divider()
