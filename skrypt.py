@@ -2,19 +2,22 @@
 Redaktor AI - Interaktywny Procesor Dokumentów z PaddleOCR
 ===========================================================
 
-INSTALACJA ZALEŻNOŚCI:
-----------------------
-# Podstawowe (jak dotychczas)
-pip uninstall docx
-pip install streamlit PyMuPDF openai python-docx mammoth
+INSTALACJA LOKALNA:
+-------------------
+# 1. Zależności systemowe (dla Linux/Docker/WSL)
+# sudo apt-get update && sudo apt-get install -y libgl1-mesa-glx libglib2.0-0
 
-# NOWE: PaddleOCR (opcjonalne, ale MOCNO zalecane)
-pip install paddlepaddle paddleocr
+# 2. Zależności Python
+pip install -r requirements.txt
 
-# Jeśli masz GPU (znacznie szybsze):
-pip install paddlepaddle-gpu paddleocr
+WDROŻENIE NA STREAMLIT CLOUD:
+-----------------------------
+W repozytorium muszą znajdować się pliki:
+1. `requirements.txt` (z listą bibliotek Python)
+2. `packages.txt` (z listą bibliotek systemowych, np. libgl1-mesa-glx)
 
-URUCHOMIENIE:
+URUCHOMIENIE LOKALNE:
+--------------------
 streamlit run redaktor_ai_enhanced.py
 """
 
@@ -29,7 +32,6 @@ import re
 import asyncio
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
-import base64
 
 # Opcjonalne importy
 try:
@@ -44,13 +46,13 @@ try:
 except ImportError:
     MAMMOTH_AVAILABLE = False
 
-# NOWE: PaddleOCR - Import z ochroną przed reinitialization
+# Importy PaddleOCR
 PADDLEOCR_AVAILABLE = False
-_GLOBAL_OCR_ENGINE = None  # Globalna instancja OCR
-
 try:
     import numpy as np
     from PIL import Image
+    # Sprawdzamy, czy można zaimportować główną klasę
+    from paddleocr import PaddleOCR
     PADDLEOCR_AVAILABLE = True
 except ImportError:
     pass
@@ -62,7 +64,7 @@ BATCH_SIZE = 10
 MAX_RETRIES = 3
 DEFAULT_MODEL = 'gpt-4o-mini'
 
-# NOWE: Konfiguracja OCR
+# Konfiguracja OCR
 OCR_CONFIDENCE_THRESHOLD = 0.6
 NATIVE_TEXT_MIN_LENGTH = 50
 
@@ -89,7 +91,7 @@ SESSION_STATE_DEFAULTS = {
     'file_type': None,
     'ocr_mode': 'paddleocr',
     'ocr_language': 'pl',
-    'optimized_articles': {}  # NOWE: Przechowuje zoptymalizowane wersje artykułów
+    'optimized_articles': {}
 }
 
 # ===== KLASY POMOCNICZE =====
@@ -107,98 +109,64 @@ class PageContent:
         if self.images is None:
             self.images = []
 
-def get_or_create_ocr_engine(language: str = 'pl'):
+# ==============================================================================
+# NOWA, STABILNA WERSJA INICJALIZACJI SILNIKA OCR
+# Używa st.session_state, co jest bezpieczne i zalecane w Streamlit.
+# Eliminuje błędy ponownej inicjalizacji.
+# ==============================================================================
+def get_ocr_engine(language: str = 'pl'):
     """
-    Singleton OCR engine z globalną instancją
-    Zapobiega błędowi reinicjalizacji PDX
+    Pobiera lub tworzy instancję silnika PaddleOCR, bezpiecznie przechowując ją w st.session_state.
+    Jest to zalecany wzorzec singleton dla aplikacji Streamlit.
     """
-    global _GLOBAL_OCR_ENGINE
-    
+    session_key = f"paddleocr_engine_{language}"
+
+    # Sprawdź, czy silnik dla danego języka już istnieje w sesji
+    if session_key in st.session_state and st.session_state[session_key] is not None:
+        return st.session_state[session_key]
+
+    # Jeśli nie, utwórz nową instancję
     if not PADDLEOCR_AVAILABLE:
-        raise RuntimeError("PaddleOCR nie jest zainstalowany!")
-    
-    # Jeśli już mamy instancję - zwróć ją
-    if _GLOBAL_OCR_ENGINE is not None:
-        return _GLOBAL_OCR_ENGINE
-    
-    # Lazy import - dopiero tutaj importujemy
+        st.error("Biblioteka PaddleOCR nie jest zainstalowana! Uruchom: pip install paddleocr")
+        return None
+
     try:
-        # Sprawdź czy PaddleX jest już zainicjalizowany
-        import sys
-        if 'paddlex' in sys.modules:
-            # PaddleX już załadowany - spróbuj użyć istniejącej konfiguracji
-            try:
-                from paddleocr import PaddleOCR
-                _GLOBAL_OCR_ENGINE = PaddleOCR(
-                    use_angle_cls=True,
-                    lang=language,
-                    show_log=False,
-                    use_gpu=False
-                )
-                return _GLOBAL_OCR_ENGINE
-            except Exception as inner_e:
-                # Jeśli to błąd reinicjalizacji, zignoruj i spróbuj ponownie
-                if "already been initialized" in str(inner_e):
-                    # Wyczyść moduł i spróbuj ponownie
-                    if 'paddlex' in sys.modules:
-                        del sys.modules['paddlex']
-                    if 'paddleocr' in sys.modules:
-                        del sys.modules['paddleocr']
-                raise inner_e
-        
-        # Normalny import
         from paddleocr import PaddleOCR
         
-        _GLOBAL_OCR_ENGINE = PaddleOCR(
-            use_angle_cls=True,
-            lang=language,
-            show_log=False,
-            use_gpu=False
-        )
-        return _GLOBAL_OCR_ENGINE
+        with st.spinner(f"Inicjalizacja silnika OCR dla języka '{language}'..."):
+            ocr_engine = PaddleOCR(
+                use_angle_cls=True,
+                lang=language,
+                show_log=False,
+                use_gpu=False  # Można to uczynić konfigurowalnym w przyszłości
+            )
         
+        # Zapisz instancję w stanie sesji, aby uniknąć ponownej inicjalizacji
+        st.session_state[session_key] = ocr_engine
+        st.toast(f"✅ Silnik OCR gotowy!", icon="🚀")
+        
+        return ocr_engine
+
     except Exception as e:
-        error_msg = str(e)
-        
-        # Jeśli PDX jest już zainicjalizowany
-        if "already been initialized" in error_msg:
-            # Próba workaround - zresetuj PaddleX
-            try:
-                import sys
-                # Usuń moduły z cache
-                modules_to_remove = [k for k in sys.modules.keys() if 'paddle' in k.lower()]
-                for mod in modules_to_remove:
-                    del sys.modules[mod]
-                
-                # Spróbuj ponownie
-                from paddleocr import PaddleOCR
-                _GLOBAL_OCR_ENGINE = PaddleOCR(
-                    use_angle_cls=True,
-                    lang=language,
-                    show_log=False,
-                    use_gpu=False
-                )
-                return _GLOBAL_OCR_ENGINE
-            except:
-                pass
-        
-        # Ostatnia próba - zwróć błąd
-        st.error(f"Nie można zainicjalizować PaddleOCR: {error_msg}")
-        st.info("💡 Rozwiązanie: Zatrzymaj Streamlit (Ctrl+C) i uruchom ponownie")
-        raise
+        st.error(f"Krytyczny błąd inicjalizacji PaddleOCR: {e}")
+        st.info("💡 Jeśli używasz Streamlit Cloud, upewnij się, że plik 'packages.txt' z 'libgl1-mesa-glx' jest w repozytorium. "
+                "W innym przypadku, zainstaluj brakujące biblioteki systemowe.")
+        return None
 
 def extract_text_with_paddleocr(image_data: bytes, language: str = 'pl') -> Tuple[str, float]:
     """
-    Wyciąga tekst z obrazu używając PaddleOCR
-    Returns: (text, average_confidence)
+    Wyciąga tekst z obrazu używając PaddleOCR.
+    Zwraca: (text, average_confidence)
     """
-    import numpy as np
-    from PIL import Image
-    
     try:
-        # Pobierz globalną instancję OCR
-        ocr = get_or_create_ocr_engine(language)
+        # Pobierz instancję OCR w bezpieczny sposób
+        ocr = get_ocr_engine(language)
         
+        # Sprawdź, czy inicjalizacja się powiodła
+        if ocr is None:
+            st.warning("Silnik OCR nie jest dostępny z powodu błędu. Ekstrakcja pominięta.")
+            return "", 0.0
+
         # Konwertuj bytes na numpy array
         img = Image.open(io.BytesIO(image_data))
         img_array = np.array(img)
@@ -226,7 +194,7 @@ def extract_text_with_paddleocr(image_data: bytes, language: str = 'pl') -> Tupl
         return full_text, avg_confidence
         
     except Exception as e:
-        st.warning(f"Błąd PaddleOCR: {e}")
+        st.warning(f"Błąd podczas przetwarzania obrazu przez PaddleOCR: {e}")
         return "", 0.0
 
 class DocumentHandler:
@@ -281,66 +249,52 @@ class DocumentHandler:
     
     def _should_use_ocr_primary(self, page_index: int) -> bool:
         """
-        NOWA LOGIKA: PaddleOCR jako PRIMARY
-        Zwraca True jeśli PaddleOCR jest dostępny i nie wyłączony przez użytkownika
+        Logika wyboru silnika ekstrakcji.
         """
         if not PADDLEOCR_AVAILABLE:
-            return False  # Brak PaddleOCR - użyj PyMuPDF
+            return False
         
-        ocr_mode = st.session_state.get('ocr_mode', 'paddleocr')  # Domyślnie PaddleOCR!
-        
-        # Tryby:
-        # - 'paddleocr': Zawsze używaj PaddleOCR (domyślny)
-        # - 'auto': Inteligentny wybór
-        # - 'native': Tylko PyMuPDF (fallback)
+        ocr_mode = st.session_state.get('ocr_mode', 'paddleocr')
         
         if ocr_mode == 'native':
-            return False  # Wymuszone PyMuPDF
+            return False
         
         if ocr_mode == 'paddleocr':
-            return True  # Zawsze PaddleOCR
+            return True
         
-        # Auto mode - sprawdź czy warto użyć OCR
+        # Tryb 'auto'
         if self.file_type != 'pdf':
-            return False  # Dla DOCX/DOC używaj standardowej metody
+            return False
         
         try:
             page = self._document.load_page(page_index)
             native_text = page.get_text("text")
             
-            # Jeśli za mało tekstu natywnego - użyj OCR
             if len(native_text.strip()) < NATIVE_TEXT_MIN_LENGTH:
                 return True
             
-            # Sprawdź czy są text blocks
             text_blocks = page.get_text("blocks")
             if not text_blocks or len(text_blocks) == 0:
                 return True
             
-            return False  # Jest dużo natywnego tekstu - nie potrzeba OCR
+            return False
             
         except:
-            return True  # W razie błędu - użyj OCR
+            return True
     
     def get_page_content(self, page_index: int, force_mode: str = None) -> PageContent:
         """
-        NOWA WERSJA: PaddleOCR jako główny silnik
-        force_mode: 'paddleocr', 'native', None (use settings)
+        Pobiera zawartość strony, używając PaddleOCR jako głównego silnika.
         """
         if self.file_type != 'pdf':
-            # Dla DOCX/DOC używamy starej metody
             return self._get_non_pdf_content(page_index)
-        
-        # === PDF - PaddleOCR jako primary ===
         
         page = self._document.load_page(page_index)
         images = self._extract_images_from_pdf_page(page_index)
         
-        # Ustal czy używać OCR
         use_ocr = force_mode == 'paddleocr' if force_mode else self._should_use_ocr_primary(page_index)
         
         if not use_ocr or not PADDLEOCR_AVAILABLE:
-            # Fallback do PyMuPDF
             native_text = page.get_text("text")
             return PageContent(
                 page_number=page_index + 1,
@@ -349,17 +303,13 @@ class DocumentHandler:
                 extraction_method="native"
             )
         
-        # === GŁÓWNA ŚCIEŻKA: PaddleOCR ===
         try:
-            # Renderuj stronę w wysokiej rozdzielczości
             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
             img_bytes = pix.tobytes("png")
             
-            # OCR
             language = st.session_state.get('ocr_language', 'pl')
             ocr_text, confidence = extract_text_with_paddleocr(img_bytes, language)
             
-            # Jeśli OCR się powiódł i ma wysoką jakość
             if confidence > OCR_CONFIDENCE_THRESHOLD or len(ocr_text.strip()) > 50:
                 return PageContent(
                     page_number=page_index + 1,
@@ -369,7 +319,6 @@ class DocumentHandler:
                     ocr_confidence=confidence
                 )
             else:
-                # Niska jakość OCR - spróbuj natywnego jako fallback
                 native_text = page.get_text("text")
                 if len(native_text.strip()) > len(ocr_text.strip()):
                     return PageContent(
@@ -389,8 +338,7 @@ class DocumentHandler:
                     )
                 
         except Exception as e:
-            # OCR failed - fallback do natywnego
-            st.warning(f"OCR nie powiodło się dla strony {page_index + 1}: {e}")
+            st.warning(f"OCR nie powiodło się dla strony {page_index + 1}: {e}. Używam metody natywnej.")
             native_text = page.get_text("text")
             return PageContent(
                 page_number=page_index + 1,
@@ -400,14 +348,12 @@ class DocumentHandler:
             )
     
     def _get_non_pdf_content(self, page_index: int) -> PageContent:
-        """Stara metoda dla DOCX/DOC"""
         if self.file_type == 'docx':
             return self._get_docx_page_content(page_index)
         elif self.file_type == 'doc':
             return self._get_doc_page_content(page_index)
     
     def _get_docx_page_content(self, page_index: int) -> PageContent:
-        """Pobiera zawartość z DOCX - dzieli na fragmenty"""
         all_paragraphs = self._document.paragraphs
         words_per_page = 500
         
@@ -423,7 +369,6 @@ class DocumentHandler:
         return PageContent(page_index + 1, page_text, images)
     
     def _get_doc_page_content(self, page_index: int) -> PageContent:
-        """Pobiera zawartość z DOC (HTML)"""
         text = re.sub('<[^<]+?>', '', self._html_content)
         words = text.split()
         words_per_page = 500
@@ -436,7 +381,6 @@ class DocumentHandler:
         return PageContent(page_index + 1, page_text, [])
     
     def _extract_images_from_pdf_page(self, page_index: int) -> List[Dict]:
-        """Wyciąga obrazy z strony PDF"""
         images = []
         if self.file_type != 'pdf':
             return images
@@ -458,7 +402,6 @@ class DocumentHandler:
         return images
     
     def _extract_images_from_docx(self) -> List[Dict]:
-        """Wyciąga obrazy z dokumentu DOCX"""
         images = []
         try:
             for rel in self._document.part.rels.values():
@@ -476,7 +419,6 @@ class DocumentHandler:
         return images
     
     def render_page_as_image(self, page_index: int) -> Optional[bytes]:
-        """Renderuje stronę jako obraz (tylko dla PDF)"""
         if self.file_type != 'pdf':
             return None
         
@@ -488,7 +430,7 @@ class DocumentHandler:
             st.error(f"Błąd podczas renderowania strony {page_index + 1}: {e}")
             return None
 
-# ===== LOGIKA AI (bez zmian, skopiowana) =====
+# ===== LOGIKA AI (bez zmian) =====
 
 class AIProcessor:
     """Klasa obsługująca komunikację z OpenAI API"""
@@ -581,8 +523,8 @@ FORMAT ODPOWIEDZI:
         """Przetwarza pojedynczą stronę"""
         page_data = {
             "page_number": page_content.page_number,
-            "extraction_method": page_content.extraction_method,  # NOWE
-            "ocr_confidence": page_content.ocr_confidence  # NOWE
+            "extraction_method": page_content.extraction_method,
+            "ocr_confidence": page_content.ocr_confidence
         }
         
         if len(page_content.text.split()) < 20:
@@ -970,7 +912,7 @@ def save_project():
     
     state_to_save = {
         k: v for k, v in st.session_state.items()
-        if k not in ['document', 'project_loaded_and_waiting_for_file']
+        if k not in ['document', 'project_loaded_and_waiting_for_file'] and not k.startswith("paddleocr_engine_")
     }
     state_to_save['extracted_pages'] = [
         p for p in st.session_state.extracted_pages if p is not None
@@ -1037,15 +979,13 @@ def handle_file_upload(uploaded_file):
                 st.session_state.project_loaded_and_waiting_for_file = False
                 st.success("✅ Plik pomyślnie dopasowany do projektu.")
             else:
-                # NAPRAWIONE: Nie resetuj kluczy widgetów!
-                # Lista kluczy które są używane przez widgety i nie mogą być resetowane
                 WIDGET_KEYS = {
                     'api_key', 'ocr_mode', 'ocr_language', 'processing_mode',
                     'start_page', 'end_page', 'article_page_groups_input'
                 }
                 
                 for key, value in SESSION_STATE_DEFAULTS.items():
-                    if key not in WIDGET_KEYS:  # Pomijamy klucze widgetów
+                    if key not in WIDGET_KEYS:
                         st.session_state[key] = value
                 
                 st.session_state.document = document
@@ -1074,7 +1014,6 @@ async def process_batch(ai_processor: AIProcessor, start_index: int):
     tasks = []
     for i in range(start_index, end_index):
         if st.session_state.document:
-            # Użyj ustawienia z UI (nie force)
             page_content = st.session_state.document.get_page_content(i, force_mode=None)
             tasks.append(ai_processor.process_page(page_content))
     
@@ -1197,11 +1136,10 @@ def init_session_state():
             st.session_state[key] = value
 
 def render_sidebar():
-    """Renderuje panel boczny - ROZSZERZONY"""
+    """Renderuje panel boczny"""
     with st.sidebar:
         st.header("⚙️ Konfiguracja Projektu")
         
-        # === OCR SETTINGS - PaddleOCR jako główny silnik ===
         if PADDLEOCR_AVAILABLE:
             with st.expander("🔍 Silnik Ekstrakcji Tekstu (PaddleOCR)", expanded=True):
                 st.info("✨ PaddleOCR jest włączony jako główny silnik!")
@@ -1238,7 +1176,6 @@ def render_sidebar():
                     key='ocr_language'
                 )
                 
-                # Info o wydajności
                 current_mode = st.session_state.get('ocr_mode', 'paddleocr')
                 if current_mode == 'paddleocr':
                     st.caption("⚡ Tryb PaddleOCR: ~5-10s na stronę (CPU)")
@@ -1250,11 +1187,10 @@ def render_sidebar():
             with st.expander("⚠️ PaddleOCR niedostępny", expanded=True):
                 st.warning("PaddleOCR nie jest zainstalowany!")
                 st.code("pip install paddleocr", language="bash")
-                st.info("Obecnie używany jest tylko PyMuPDF (działa tylko dla natywnych PDF)")
+                st.info("Obecnie używany jest tylko PyMuPDF.")
         
         st.divider()
         
-        # Reszta bez zmian...
         projects = get_existing_projects()
         selected_project = st.selectbox(
             "Wybierz istniejący projekt",
@@ -1289,20 +1225,11 @@ def render_sidebar():
             st.divider()
             st.subheader("🤖 Opcje Przetwarzania")
             
-            # NOWY: Smart tip dla magazynów
             if st.session_state.file_type == 'pdf' and st.session_state.total_pages > 5:
                 with st.expander("💡 Wskazówka: Przetwarzanie magazynów", expanded=True):
                     st.markdown("""
                     **Czy to skan magazynu/czasopisma?**
-                    
                     👉 Użyj trybu **"Artykuł wielostronicowy"** poniżej!
-                    
-                    **Przykład:**
-                    - Artykuł 1: strony 2-4 → wpisz `2-4`
-                    - Artykuł 2: strony 6-8 → wpisz `6-8`
-                    - Artykuł 3: strony 10-13 → wpisz `10-13`
-                    
-                    Każdy artykuł zostanie przetworzony jako całość w jednym zapytaniu!
                     """)
             
             st.radio(
@@ -1318,7 +1245,6 @@ def render_sidebar():
                 help="""
                 **Artykuł wielostronicowy** - Idealny dla skanów magazynów/czasopism!
                 Łączy wybrane strony w jeden artykuł w jednym zapytaniu do AI.
-                Np. artykuł na stronach 2-4 zostanie przetworzony jako całość.
                 """
             )
             
@@ -1343,16 +1269,13 @@ def render_sidebar():
                 **Przykład dla magazynu:**
                 - Artykuł 1 na str. 2-4 → wpisz: `2-4`
                 - Artykuł 2 na str. 6-8 → wpisz: `6-8`
-                - Artykuł 3 na str. 10,11,13 → wpisz: `10,11,13`
-                
                 Każda linia = jeden artykuł!
                 """)
                 st.text_area(
                     "Zakresy stron artykułów (jeden artykuł na linię)",
                     key='article_page_groups_input',
                     placeholder="2-4\n6-8\n10-13\n15,16,18",
-                    height=120,
-                    help="Każda linia to osobny artykuł. Używaj zakresów (2-4) lub pojedynczych stron oddzielonych przecinkami (10,11,13)"
+                    height=120
                 )
             
             st.divider()
@@ -1383,7 +1306,6 @@ def render_sidebar():
             st.metric("Liczba stron", st.session_state.total_pages)
             st.caption(f"**Format:** {st.session_state.file_type.upper()}")
             
-            # OCR status
             if PADDLEOCR_AVAILABLE:
                 ocr_mode_label = {
                     'paddleocr': '🔬 PaddleOCR',
@@ -1395,7 +1317,7 @@ def render_sidebar():
                 st.caption("**Silnik:** 📄 PyMuPDF (OCR niedostępny)")
 
 def render_processing_status():
-    """Renderuje status przetwarzania (bez zmian)"""
+    """Renderuje status przetwarzania"""
     if st.session_state.processing_status == 'idle' or not st.session_state.document:
         return
     
@@ -1463,7 +1385,7 @@ def render_processing_status():
             )
 
 def render_navigation():
-    """Renderuje nawigację (bez zmian z poprzedniej wersji)"""
+    """Renderuje nawigację"""
     if st.session_state.total_pages <= 1:
         return
     
@@ -1538,7 +1460,7 @@ def render_navigation():
         st.rerun()
 
 def render_page_view():
-    """Renderuje widok strony - ROZSZERZONY"""
+    """Renderuje widok strony"""
     st.divider()
     
     page_index = st.session_state.current_page
@@ -1586,7 +1508,6 @@ def render_page_view():
     with text_col:
         st.subheader("🤖 Tekst przetworzony przez AI")
         
-        # Info o metodzie ekstrakcji
         extraction_method = page_content.extraction_method
         method_info = {
             'native': '📄 PyMuPDF (natywna ekstrakcja)',
@@ -1639,8 +1560,7 @@ def render_page_view():
                 unsafe_allow_html=True
             )
             
-            # Przyciski akcji
-            action_cols = st.columns(4)  # Zwiększone z 3 do 4
+            action_cols = st.columns(4)
             
             if action_cols[0].button(
                 "🔄 Przetwórz ponownie",
@@ -1663,7 +1583,6 @@ def render_page_view():
             ):
                 handle_meta_tag_generation(page_index, page_result['raw_markdown'])
             
-            # NOWY: Przycisk optymalizacji artykułu
             if action_cols[2].button(
                 "🚀 Optymalizuj SEO",
                 key=f"optimize_{page_index}",
@@ -1736,7 +1655,6 @@ def render_page_view():
                             key=f"md_{page_index}"
                         )
             
-            # NOWY: Wyświetlanie zoptymalizowanego artykułu
             if page_index in st.session_state.get('optimized_articles', {}):
                 optimized = st.session_state.optimized_articles[page_index]
                 
@@ -1746,40 +1664,33 @@ def render_page_view():
                     with st.expander("🚀 Zoptymalizowany Artykuł (SEO + Odwrócona Piramida)", expanded=True):
                         st.success("✨ Artykuł został zoptymalizowany pod publikację internetową!")
                         
-                        # Meta description
                         if 'meta_description' in optimized:
                             st.info(f"**Meta Description:** {optimized['meta_description']}")
                         
-                        # Tytuł
                         if 'optimized_title' in optimized:
                             st.markdown(f"### {optimized['optimized_title']}")
                             st.caption("⬆️ Zoptymalizowany tytuł SEO (H1)")
                             st.divider()
                         
-                        # Kluczowe punkty (key takeaways)
                         if 'key_takeaways' in optimized and optimized['key_takeaways']:
                             st.markdown("**📌 Kluczowe informacje:**")
                             for point in optimized['key_takeaways']:
                                 st.markdown(f"• {point}")
                             st.divider()
                         
-                        # Zoptymalizowana treść
                         if 'optimized_content' in optimized:
                             st.markdown("**📄 Zoptymalizowana treść (struktura odwróconej piramidy):**")
                             st.markdown(optimized['optimized_content'])
                             st.divider()
                             
-                            # Sugerowane linki wewnętrzne
                             if 'suggested_internal_links' in optimized and optimized['suggested_internal_links']:
                                 st.markdown("**🔗 Sugerowane tematy do linkowania wewnętrznego:**")
                                 for link_topic in optimized['suggested_internal_links']:
                                     st.markdown(f"• {link_topic}")
                                 st.divider()
                             
-                            # Przyciski pobierania
                             col1, col2 = st.columns(2)
                             
-                            # Pobierz jako HTML
                             optimized_html = markdown_to_clean_html(optimized['optimized_content'])
                             optimized_doc = generate_full_html_document(
                                 optimized_html,
@@ -1797,7 +1708,6 @@ def render_page_view():
                                 key=f"download_optimized_html_{page_index}"
                             )
                             
-                            # Pobierz jako Markdown
                             col2.download_button(
                                 label="📥 Pobierz Markdown",
                                 data=optimized['optimized_content'],
@@ -1857,7 +1767,6 @@ def handle_article_optimization(page_index: int, raw_markdown: str):
         ai_processor = AIProcessor(st.session_state.api_key, st.session_state.model)
         optimized = asyncio.run(ai_processor.generate_optimized_article(raw_markdown))
         
-        # Zapisz zoptymalizowaną wersję
         if 'optimized_articles' not in st.session_state:
             st.session_state.optimized_articles = {}
         st.session_state.optimized_articles[page_index] = optimized
@@ -1904,28 +1813,14 @@ def main():
     
     init_session_state()
     
-    # Warnings o brakujących bibliotekach
-    missing = []
-    if not DOCX_AVAILABLE:
-        missing.append("DOCX (zainstaluj: pip install python-docx)")
-    if not MAMMOTH_AVAILABLE:
-        missing.append("DOC (zainstaluj: pip install mammoth)")
-    
     if not PADDLEOCR_AVAILABLE:
-        st.error("⚠️ **PaddleOCR nie jest zainstalowany!**")
-        st.warning("PaddleOCR jest GŁÓWNYM silnikiem tej aplikacji. Bez niego działa tylko podstawowa ekstrakcja PyMuPDF.")
-        st.code("pip install paddleocr", language="bash")
-        st.info("💡 Po instalacji odśwież stronę (Ctrl+R)")
-    
-    if missing:
-        with st.sidebar:
-            with st.expander("⚠️ Opcjonalne biblioteki", expanded=False):
-                for fmt in missing:
-                    st.write(f"- {fmt}")
+        st.error("⚠️ **Krytyczny błąd: PaddleOCR nie jest zainstalowany!**")
+        st.warning("Ta aplikacja wymaga biblioteki PaddleOCR. Uruchom `pip install paddleocr` w swoim środowisku.")
+        st.info("Jeśli wdrażasz na Streamlit Cloud, upewnij się, że `paddleocr` jest w pliku `requirements.txt`.")
     
     if not st.session_state.api_key:
         st.error("❌ Brak klucza API OpenAI!")
-        st.info("Proszę skonfiguruj swój klucz API w Streamlit Secrets.")
+        st.info("Proszę skonfiguruj swój klucz API w pliku `secrets.toml` w Streamlit.")
         st.stop()
     
     render_sidebar()
@@ -1937,45 +1832,17 @@ def main():
             with st.expander("📖 Jak korzystać z aplikacji?"):
                 st.markdown("""
                 ### 🔬 PaddleOCR jako Główny Silnik
-                
-                Ta aplikacja używa **PaddleOCR** jako głównego mechanizmu ekstrakcji tekstu!
-                
-                **Zalety:**
-                - ✅ Działa na skanach i zdjęciach dokumentów
-                - ✅ Wykrywa tekst w obrazach
-                - ✅ Obsługuje 80+ języków
-                - ✅ Rozpoznaje skomplikowane layouty
+                Ta aplikacja używa **PaddleOCR** jako głównego mechanizmu ekstrakcji tekstu, co pozwala na pracę ze skanami i zdjęciami dokumentów.
                 
                 ### Tryby Ekstrakcji:
-                
-                1. **🔬 PaddleOCR (domyślny)** - Zawsze używa OCR, najlepsza jakość
-                2. **🤖 Auto** - Inteligentny wybór: OCR dla skanów, PyMuPDF dla natywnych PDF
-                3. **📄 PyMuPDF** - Tylko natywna ekstrakcja (szybkie, ale nie działa na skanach)
+                1. **🔬 PaddleOCR (domyślny)** - Zawsze używa OCR, najlepsza jakość.
+                2. **🤖 Auto** - Inteligentny wybór: OCR dla skanów, PyMuPDF dla natywnych PDF.
+                3. **📄 PyMuPDF** - Tylko natywna ekstrakcja (szybkie, ale nie działa na skanach).
                 
                 ### Tryby Przetwarzania:
-                
-                1. **Cały dokument** - Przetwarza każdą stronę osobno
-                2. **Zakres stron** - Przetwarza wybrany zakres
-                3. **Artykuł wielostronicowy** - Łączy strony w jeden artykuł
-                
-                ### Obsługiwane formaty:
-                - PDF (wszystkie - natywne i skany!)
-                - DOCX (Microsoft Word)
-                - DOC (starsze pliki Word)
-                
-                ### Funkcje:
-                - ✅ Zapisywanie i ładowanie projektów
-                - ✅ Wyciąganie grafik ze stron
-                - ✅ Generowanie meta tagów SEO
-                - ✅ Eksport do HTML
-                - ✅ **OCR dla skanów i zdjęć**
-                - ✅ **Obsługa wielu języków**
-                - ✅ **Wykrywanie jakości tekstu**
-                
-                ### 💡 Wskazówki:
-                - Dla **skanów**: użyj trybu PaddleOCR (domyślny)
-                - Dla **nowoczesnych PDF**: możesz użyć PyMuPDF (szybsze)
-                - Nie wiesz?: zostaw Auto
+                1. **Cały dokument** - Przetwarza każdą stronę osobno.
+                2. **Zakres stron** - Przetwarza wybrany zakres.
+                3. **Artykuł wielostronicowy** - Łączy strony w jeden artykuł, idealne dla magazynów.
                 """)
         return
     
