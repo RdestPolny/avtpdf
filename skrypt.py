@@ -58,6 +58,7 @@ SESSION_STATE_DEFAULTS = {
     'api_key': None,
     'model': DEFAULT_MODEL,
     'meta_tags': {},
+    'seo_articles': {},  ##### NOWOŚĆ: Słownik do przechowywania zoptymalizowanych artykułów
     'project_loaded_and_waiting_for_file': False,
     'processing_mode': 'all',
     'start_page': 1,
@@ -271,7 +272,29 @@ WYMAGANIA:
 
 FORMAT ODPOWIEDZI:
 {"meta_title": "Tytuł meta", "meta_description": "Opis meta."}"""
-    
+
+    ##### NOWOŚĆ: Prompt dla optymalizacji SEO #####
+    def get_seo_prompt(self) -> str:
+        """Zwraca prompt dla optymalizacji artykułu pod kątem SEO."""
+        return """Jesteś światowej klasy strategiem SEO i copywriterem. Twoim zadaniem jest przepisanie dostarczonego artykułu, aby był maksymalnie zoptymalizowany pod kątem wyszukiwarek i angażujący dla czytelników online.
+
+ZASADY KRYTYCZNE:
+1.  **WIERNOŚĆ FAKTÓW**: Musisz bazować WYŁĄCZNIE na informacjach zawartych w oryginalnym tekście. Nie dodawaj żadnych nowych faktów, danych ani opinii. Twoja rola to restrukturyzacja i optymalizacja, a nie tworzenie nowej treści.
+2.  **ODWRÓCONA PIRAMIDA**: Zastosuj zasadę odwróconej piramidy. Najważniejsze informacje, kluczowe wnioski i odpowiedzi na potencjalne pytania czytelnika umieść na samym początku artykułu.
+3.  **STRUKTURA I CZYTELNOŚĆ**:
+    *   Stwórz nowy, chwytliwy tytuł zoptymalizowany pod kątem potencjalnych fraz kluczowych (H1).
+    *   Podziel tekst na logiczne sekcje za pomocą śródtytułów (H2, H3).
+    *   Używaj krótkich akapitów.
+    *   Stosuj pogrubienia (`**tekst**`) dla najważniejszych terminów, fraz kluczowych i nazw własnych, aby ułatwić skanowanie tekstu.
+4.  **JĘZYK**: Używaj aktywnego, dynamicznego języka. Unikaj strony biernej. Pisz bezpośrednio do czytelnika.
+
+WYMAGANIA FORMATOWANIA:
+- Twoja odpowiedź musi być WYŁĄCZNIE poprawnym obiektem JSON.
+- NIE używaj bloków kodu markdown (```json).
+
+FORMAT ODPOWIEDZI JSON:
+{"seo_title": "Nowy, zoptymalizowany pod SEO tytuł artykułu", "seo_article_markdown": "Pełna treść przepisanego artykułu w formacie Markdown, z nagłówkami i pogrubieniami."}"""
+
     async def process_text(self, text: str, system_prompt: str, max_tokens: int = 4096) -> Dict:
         """Przetwarza tekst przez OpenAI API"""
         last_error = None
@@ -286,7 +309,7 @@ FORMAT ODPOWIEDZI:
                         {"role": "user", "content": text}
                     ],
                     max_tokens=max_tokens,
-                    temperature=0.1,
+                    temperature=0.3, # nieco więcej kreatywności dla SEO
                     response_format={"type": "json_object"}
                 )
                 
@@ -299,13 +322,13 @@ FORMAT ODPOWIEDZI:
                 
             except json.JSONDecodeError as e:
                 last_error = e
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(1)
+                st.warning(f"Próba {attempt + 1}: Błąd dekodowania JSON. Ponawiam próbę...")
+                await asyncio.sleep(1)
                 continue
             except Exception as e:
                 last_error = e
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(1)
+                st.warning(f"Próba {attempt + 1}: Wystąpił błąd API: {e}. Ponawiam próbę...")
+                await asyncio.sleep(1)
                 continue
         
         return {
@@ -380,6 +403,13 @@ FORMAT ODPOWIEDZI:
         """Generuje meta tagi dla artykułu"""
         prompt = self.get_meta_tags_prompt()
         return await self.process_text(article_text[:4000], prompt, max_tokens=200)
+
+    ##### NOWOŚĆ: Metoda do generowania artykułu SEO #####
+    async def generate_seo_article(self, article_text: str) -> Dict:
+        """Przepisuje artykuł pod kątem SEO"""
+        prompt = self.get_seo_prompt()
+        # Zwiększamy max_tokens, ponieważ AI przepisuje całą treść
+        return await self.process_text(article_text, prompt, max_tokens=4096)
 
 # ===== FUNKCJE POMOCNICZE =====
 
@@ -1171,8 +1201,17 @@ def render_page_view():
                 unsafe_allow_html=True
             )
             
-            # PRZYCISKI AKCJI
-            action_cols = st.columns(3)
+            # --- PRZYCISKI AKCJI ---
+            st.write("---")
+            st.markdown("**Akcje Redakcyjne:**")
+            
+            allow_actions = (
+                page_type == 'artykuł' and
+                'raw_markdown' in page_result and
+                page_result.get('is_group_lead', True)
+            )
+
+            action_cols = st.columns(4)
             
             if action_cols[0].button(
                 "🔄 Przetwórz ponownie",
@@ -1181,30 +1220,35 @@ def render_page_view():
             ):
                 handle_page_reroll(page_index)
             
-            allow_meta = (
-                page_type == 'artykuł' and
-                'raw_markdown' in page_result and
-                page_result.get('is_group_lead', True)
-            )
-            
             if action_cols[1].button(
                 "✨ Generuj Meta",
                 key=f"meta_{page_index}",
                 use_container_width=True,
-                disabled=not allow_meta
+                disabled=not allow_actions
             ):
                 handle_meta_tag_generation(page_index, page_result['raw_markdown'])
             
+            ##### NOWOŚĆ: Przycisk do optymalizacji SEO #####
+            if action_cols[2].button(
+                "🚀 Optymalizuj dla SEO",
+                key=f"seo_{page_index}",
+                use_container_width=True,
+                disabled=not allow_actions,
+                help="Przepisz artykuł zgodnie z zasadami SEO"
+            ):
+                handle_seo_generation(page_index, page_result['raw_markdown'])
+
+
             # Checkbox do pokazywania HTML
-            show_html = action_cols[2].checkbox(
+            show_html = action_cols[3].checkbox(
                 "📄 Pokaż HTML",
                 key=f"show_html_checkbox_{page_index}",
-                disabled=not allow_meta,
+                disabled=not allow_actions,
                 help="Pokaż i pobierz czysty HTML artykułu"
             )
             
             # WYŚWIETLENIE HTML JEŚLI CHECKBOX ZAZNACZONY
-            if show_html and allow_meta:
+            if show_html and allow_actions:
                 html_data = get_article_html_from_page(page_index)
                 
                 if html_data:
@@ -1243,6 +1287,8 @@ def render_page_view():
                         if html_data['meta_title'] or html_data['meta_description']:
                             st.info("ℹ️ Ten HTML zawiera wygenerowane meta tagi SEO")
             
+            # --- WYNIKI AKCJI ---
+
             # META TAGI
             if page_index in st.session_state.meta_tags:
                 tags = st.session_state.meta_tags[page_index]
@@ -1250,7 +1296,7 @@ def render_page_view():
                 if "error" in tags:
                     st.error(f"Błąd generowania meta tagów: {tags['error']}")
                 else:
-                    with st.expander("Wygenerowane Meta Tagi ✨", expanded=True):
+                    with st.expander("Wygenerowane Meta Tagi ✨", expanded=False):
                         st.text_input(
                             "Meta Title",
                             value=tags.get("meta_title", ""),
@@ -1261,6 +1307,29 @@ def render_page_view():
                             value=tags.get("meta_description", ""),
                             key=f"md_{page_index}"
                         )
+            
+            ##### NOWOŚĆ: Wyświetlanie zoptymalizowanego artykułu SEO #####
+            if page_index in st.session_state.seo_articles:
+                seo_result = st.session_state.seo_articles[page_index]
+                with st.expander("🤖 Zoptymalizowany Artykuł SEO", expanded=True):
+                    if "error" in seo_result:
+                        st.error(f"Błąd podczas optymalizacji SEO: {seo_result['error']}")
+                        st.json(seo_result)
+                    else:
+                        seo_title = seo_result.get("seo_title", "Brak tytułu")
+                        seo_markdown = seo_result.get("seo_article_markdown", "Brak treści.")
+                        
+                        st.markdown(f"### {seo_title}")
+                        st.markdown(seo_markdown, unsafe_allow_html=True)
+                        st.download_button(
+                            label="📥 Pobierz wersję SEO (.txt)",
+                            data=f"# {seo_title}\n\n{seo_markdown}",
+                            file_name=f"{sanitize_filename(seo_title)}.txt",
+                            mime="text/plain",
+                            use_container_width=True,
+                            key=f"download_seo_{page_index}"
+                        )
+
         else:
             if st.session_state.processing_status == 'in_progress':
                 st.info("⏳ Strona oczekuje na przetworzenie...")
@@ -1303,6 +1372,16 @@ def handle_meta_tag_generation(page_index: int, raw_markdown: str):
         ai_processor = AIProcessor(st.session_state.api_key, st.session_state.model)
         tags = asyncio.run(ai_processor.generate_meta_tags(raw_markdown))
         st.session_state.meta_tags[page_index] = tags
+    
+    st.rerun()
+
+##### NOWOŚĆ: Funkcja obsługująca generowanie artykułu SEO #####
+def handle_seo_generation(page_index: int, raw_markdown: str):
+    """Generuje zoptymalizowaną wersję artykułu"""
+    with st.spinner("🚀 Optymalizowanie artykułu dla SEO... To może chwilę potrwać."):
+        ai_processor = AIProcessor(st.session_state.api_key, st.session_state.model)
+        result = asyncio.run(ai_processor.generate_seo_article(raw_markdown))
+        st.session_state.seo_articles[page_index] = result
     
     st.rerun()
 
@@ -1387,6 +1466,7 @@ def main():
                 - Zapisywanie i ładowanie projektów
                 - Wyciąganie grafik ze stron
                 - Generowanie meta tagów SEO
+                - **Nowość! Optymalizacja artykułów pod kątem SEO**
                 - **Eksport do HTML** - czysty HTML bez stylowania
                 - Ponowne przetwarzanie stron z kontekstem
                 - **Automatyczna nawigacja** - przejście do zakresu po rozpoczęciu
