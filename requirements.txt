@@ -1,24 +1,9 @@
-# Redaktor AI - Procesor Dokumentów z PaddleOCR
-# Instalacja: pip install -r requirements.txt
-
-# === PODSTAWOWE (wymagane) ===
-streamlit>=1.28.0
-PyMuPDF>=1.23.0
-openai>=1.0.0
-
-# === GŁÓWNY SILNIK OCR (wymagany dla pełnej funkcjonalności) ===
-paddleocr>=2.7.0
-# paddlepaddle-gpu  # Odkomentuj jeśli masz NVIDIA GPU
-
-# === OBSŁUGA WORD (opcjonalne) ===
-python-docx>=1.1.0  # Dla .docx
-mammoth>=1.6.0      # Dla starych .doc
-
-# === ZALEŻNOŚCI POMOCNICZE ===
-numpy>=1.24.0
-Pillow>=10.0.0
-
-# === UWAGI ===
-# 1. Python 3.8-3.12 (NIE 3.13 - problemy z kompatybilnością!)
-# 2. Dla GPU: zamień paddlepaddle na paddlepaddle-gpu
-# 3. Pierwszy uruchomienie pobierze modele OCR (~100MB)
+streamlit
+PyMuPDF
+openai
+python-docx
+mammoth
+paddlepaddle
+paddleocr
+numpy
+Pillow
