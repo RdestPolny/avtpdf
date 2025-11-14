@@ -46,10 +46,11 @@ except ImportError:
 
 # NOWE: PaddleOCR - Import z ochroną przed reinitialization
 PADDLEOCR_AVAILABLE = False
+_GLOBAL_OCR_ENGINE = None  # Globalna instancja OCR
+
 try:
     import numpy as np
     from PIL import Image
-    # Lazy import - importujemy dopiero gdy potrzebne
     PADDLEOCR_AVAILABLE = True
 except ImportError:
     pass
@@ -62,8 +63,8 @@ MAX_RETRIES = 3
 DEFAULT_MODEL = 'gpt-4o-mini'
 
 # NOWE: Konfiguracja OCR
-OCR_CONFIDENCE_THRESHOLD = 0.6  # Minimalny confidence dla PaddleOCR
-NATIVE_TEXT_MIN_LENGTH = 50     # Minimalna długość tekstu z PyMuPDF, żeby uznać za OK
+OCR_CONFIDENCE_THRESHOLD = 0.6
+NATIVE_TEXT_MIN_LENGTH = 50
 
 SESSION_STATE_DEFAULTS = {
     'processing_status': 'idle',
@@ -86,8 +87,9 @@ SESSION_STATE_DEFAULTS = {
     'article_groups': [],
     'next_article_index': 0,
     'file_type': None,
-    'ocr_mode': 'paddleocr',  # ZMIENIONE: 'paddleocr' (główny), 'auto', 'native'
-    'ocr_language': 'pl'
+    'ocr_mode': 'paddleocr',
+    'ocr_language': 'pl',
+    'optimized_articles': {}  # NOWE: Przechowuje zoptymalizowane wersje artykułów
 }
 
 # ===== KLASY POMOCNICZE =====
@@ -98,37 +100,91 @@ class PageContent:
     page_number: int
     text: str
     images: List[Dict] = None
-    extraction_method: str = "native"  # NOWE: 'native', 'ocr', 'hybrid'
-    ocr_confidence: float = 0.0  # NOWE: średni confidence z OCR
+    extraction_method: str = "native"
+    ocr_confidence: float = 0.0
     
     def __post_init__(self):
         if self.images is None:
             self.images = []
 
-# NOWE: Streamlit-cached OCR initialization (zapobiega reinitialization error)
-@st.cache_resource
-def get_ocr_engine(language: str = 'pl'):
+def get_or_create_ocr_engine(language: str = 'pl'):
     """
-    Tworzy i cachuje instancję PaddleOCR
-    @st.cache_resource zapewnia że zostanie utworzona tylko raz
+    Singleton OCR engine z globalną instancją
+    Zapobiega błędowi reinicjalizacji PDX
     """
-    if not PADDLEOCR_AVAILABLE:
-        raise RuntimeError("PaddleOCR nie jest zainstalowany! Zainstaluj: pip install paddleocr")
+    global _GLOBAL_OCR_ENGINE
     
-    # Lazy import - tylko tutaj importujemy PaddleOCR
+    if not PADDLEOCR_AVAILABLE:
+        raise RuntimeError("PaddleOCR nie jest zainstalowany!")
+    
+    # Jeśli już mamy instancję - zwróć ją
+    if _GLOBAL_OCR_ENGINE is not None:
+        return _GLOBAL_OCR_ENGINE
+    
+    # Lazy import - dopiero tutaj importujemy
     try:
+        # Sprawdź czy PaddleX jest już zainicjalizowany
+        import sys
+        if 'paddlex' in sys.modules:
+            # PaddleX już załadowany - spróbuj użyć istniejącej konfiguracji
+            try:
+                from paddleocr import PaddleOCR
+                _GLOBAL_OCR_ENGINE = PaddleOCR(
+                    use_angle_cls=True,
+                    lang=language,
+                    show_log=False,
+                    use_gpu=False
+                )
+                return _GLOBAL_OCR_ENGINE
+            except Exception as inner_e:
+                # Jeśli to błąd reinicjalizacji, zignoruj i spróbuj ponownie
+                if "already been initialized" in str(inner_e):
+                    # Wyczyść moduł i spróbuj ponownie
+                    if 'paddlex' in sys.modules:
+                        del sys.modules['paddlex']
+                    if 'paddleocr' in sys.modules:
+                        del sys.modules['paddleocr']
+                raise inner_e
+        
+        # Normalny import
         from paddleocr import PaddleOCR
         
-        # Inicjalizacja OCR
-        ocr = PaddleOCR(
-            use_angle_cls=True,  # Wykrywa obrót tekstu
+        _GLOBAL_OCR_ENGINE = PaddleOCR(
+            use_angle_cls=True,
             lang=language,
             show_log=False,
-            use_gpu=False  # Zmień na True jeśli masz GPU
+            use_gpu=False
         )
-        return ocr
+        return _GLOBAL_OCR_ENGINE
+        
     except Exception as e:
-        st.error(f"Błąd inicjalizacji PaddleOCR: {e}")
+        error_msg = str(e)
+        
+        # Jeśli PDX jest już zainicjalizowany
+        if "already been initialized" in error_msg:
+            # Próba workaround - zresetuj PaddleX
+            try:
+                import sys
+                # Usuń moduły z cache
+                modules_to_remove = [k for k in sys.modules.keys() if 'paddle' in k.lower()]
+                for mod in modules_to_remove:
+                    del sys.modules[mod]
+                
+                # Spróbuj ponownie
+                from paddleocr import PaddleOCR
+                _GLOBAL_OCR_ENGINE = PaddleOCR(
+                    use_angle_cls=True,
+                    lang=language,
+                    show_log=False,
+                    use_gpu=False
+                )
+                return _GLOBAL_OCR_ENGINE
+            except:
+                pass
+        
+        # Ostatnia próba - zwróć błąd
+        st.error(f"Nie można zainicjalizować PaddleOCR: {error_msg}")
+        st.info("💡 Rozwiązanie: Zatrzymaj Streamlit (Ctrl+C) i uruchom ponownie")
         raise
 
 def extract_text_with_paddleocr(image_data: bytes, language: str = 'pl') -> Tuple[str, float]:
@@ -140,8 +196,8 @@ def extract_text_with_paddleocr(image_data: bytes, language: str = 'pl') -> Tupl
     from PIL import Image
     
     try:
-        # Pobierz cached OCR engine
-        ocr = get_ocr_engine(language)
+        # Pobierz globalną instancję OCR
+        ocr = get_or_create_ocr_engine(language)
         
         # Konwertuj bytes na numpy array
         img = Image.open(io.BytesIO(image_data))
@@ -159,7 +215,6 @@ def extract_text_with_paddleocr(image_data: bytes, language: str = 'pl') -> Tupl
         
         for line in result[0]:
             if line:
-                # Struktura: [bbox, (text, confidence)]
                 text = line[1][0]
                 confidence = line[1][1]
                 texts.append(text)
@@ -588,10 +643,107 @@ FORMAT ODPOWIEDZI:
         
         return article_data
     
+    def get_optimized_article_prompt(self) -> str:
+        """Zwraca prompt dla generowania zoptymalizowanego artykułu"""
+        return """Jesteś ekspertem content marketingu i SEO. Twoim zadaniem jest przekształcenie zredagowanego artykułu w zoptymalizowaną wersję pod publikację internetową.
+
+STRUKTURA ODWRÓCONEJ PIRAMIDY:
+1. Lead (1-2 akapity): Najważniejsze informacje, odpowiedzi na pytania: kto, co, gdzie, kiedy, dlaczego
+2. Rozwinięcie: Szczegóły, kontekst, dodatkowe informacje
+3. Tło: Mniej istotne szczegóły, historia, dodatkowy kontekst
+
+OPTYMALIZACJA SEO:
+- Chwytliwy tytuł H1 (zawiera główne słowo kluczowe, max 60 znaków)
+- Śródtytuły H2, H3 (zawierają słowa kluczowe, pytania użytkowników)
+- Pierwsze 100 słów zawiera główne słowa kluczowe
+- Krótkie, zrozumiałe akapity (2-4 zdania)
+- Pogrubienia dla ważnych terminów
+- Listy punktowane tam gdzie to ma sens
+
+ZASADY:
+- Zachowaj wszystkie fakty z oryginalnego tekstu
+- Użyj języka naturalnego, unikaj sztuczności
+- Pierwsze zdanie musi być najważniejsze i przyciągające uwagę
+- Używaj aktywnej strony czasownika
+- Dodaj internal linking hints w [nawiasach kwadratowych]
+
+WYMAGANIA KRYTYCZNE:
+- Odpowiedź TYLKO w formacie JSON
+- NIE używaj markdown code blocks (```json)
+
+FORMAT ODPOWIEDZI:
+{
+  "optimized_title": "Chwytliwy tytuł SEO (max 60 znaków)",
+  "meta_description": "Opis meta (max 160 znaków)",
+  "optimized_content": "Zoptymalizowana treść w markdown z H1, H2, H3, **pogrubieniami**, listami",
+  "key_takeaways": ["Kluczowa informacja 1", "Kluczowa informacja 2", "Kluczowa informacja 3"],
+  "suggested_internal_links": ["Temat 1 do linkowania", "Temat 2 do linkowania"]
+}"""
+    
     async def generate_meta_tags(self, article_text: str) -> Dict:
         """Generuje meta tagi dla artykułu"""
         prompt = self.get_meta_tags_prompt()
         return await self.process_text(article_text[:4000], prompt, max_tokens=200)
+    
+    async def generate_optimized_article(self, original_markdown: str) -> Dict:
+        """Generuje zoptymalizowaną wersję artykułu"""
+        prompt = self.get_optimized_article_prompt()
+        context = f"""Oto zredagowany artykuł do zoptymalizowania:
+
+---
+{original_markdown}
+---
+
+Przekształć ten artykuł zgodnie z wytycznymi."""
+        
+        return await self.process_text(context, prompt, max_tokens=4096)
+    
+    def get_optimization_prompt(self) -> str:
+        """Zwraca prompt dla optymalizacji artykułu pod SEO"""
+        return """Jesteś ekspertem SEO i copywriterem. Twoim zadaniem jest przekształcenie surowego artykułu w zoptymalizowany artykuł internetowy.
+
+ZASADY:
+1. **Struktura odwróconej piramidy informacji:**
+   - Lead: Najważniejsze informacje + wartość dla czytelnika w pierwszym akapicie
+   - Rozwinięcie: Szczegóły i kontekst w kolejnych akapitach
+   - Dodatkowe informacje na końcu
+
+2. **Optymalizacja SEO:**
+   - Chwytliwy tytuł H1 z słowem kluczowym
+   - Śródtytuły H2/H3 zawierające naturalne słowa kluczowe
+   - Meta description w pierwszym akapicie (150-160 znaków wartościowej informacji)
+
+3. **Formatowanie:**
+   - Krótkie akapity (2-4 zdania)
+   - Pogrubienia dla kluczowych informacji
+   - Listy punktowane gdzie ma sens
+   - Podział na sekcje dla lepszej czytelności
+
+4. **Styl pisania:**
+   - Konkretny i wartościowy
+   - Aktywny tryb czasowników
+   - Bezpośrednie zwracanie się do czytelnika (jeśli pasuje do tematyki)
+   - Eliminacja zbędnych słów
+
+WYMAGANIA KRYTYCZNE:
+- Zachowaj WSZYSTKIE fakty i dane z oryginału
+- Nie dodawaj informacji które nie są w tekście źródłowym
+- Odpowiedź TYLKO jako czysty JSON (bez markdown blocks)
+
+FORMAT ODPOWIEDZI:
+{
+  "optimized_title": "Chwytliwy tytuł H1",
+  "optimized_content": "Treść artykułu w markdown z pełną strukturą",
+  "key_points": ["Punkt 1", "Punkt 2", "Punkt 3"],
+  "seo_keywords": ["słowo1", "słowo2", "słowo3"]
+}"""
+    
+    async def optimize_article(self, article_text: str) -> Dict:
+        """
+        Optymalizuje artykuł pod SEO i strukturę odwróconej piramidy
+        """
+        prompt = self.get_optimization_prompt()
+        return await self.process_text(article_text, prompt, max_tokens=8192)
 
 # ===== FUNKCJE POMOCNICZE (bez zmian) =====
 
@@ -1488,7 +1640,7 @@ def render_page_view():
             )
             
             # Przyciski akcji
-            action_cols = st.columns(3)
+            action_cols = st.columns(4)  # Zwiększone z 3 do 4
             
             if action_cols[0].button(
                 "🔄 Przetwórz ponownie",
@@ -1511,7 +1663,17 @@ def render_page_view():
             ):
                 handle_meta_tag_generation(page_index, page_result['raw_markdown'])
             
-            show_html = action_cols[2].checkbox(
+            # NOWY: Przycisk optymalizacji artykułu
+            if action_cols[2].button(
+                "🚀 Optymalizuj SEO",
+                key=f"optimize_{page_index}",
+                use_container_width=True,
+                disabled=not allow_meta,
+                help="Zoptymalizuj artykuł pod SEO i strukturę odwróconej piramidy"
+            ):
+                handle_article_optimization(page_index, page_result['raw_markdown'])
+            
+            show_html = action_cols[3].checkbox(
                 "📄 Pokaż HTML",
                 key=f"show_html_checkbox_{page_index}",
                 disabled=not allow_meta,
@@ -1573,6 +1735,77 @@ def render_page_view():
                             value=tags.get("meta_description", ""),
                             key=f"md_{page_index}"
                         )
+            
+            # NOWY: Wyświetlanie zoptymalizowanego artykułu
+            if page_index in st.session_state.get('optimized_articles', {}):
+                optimized = st.session_state.optimized_articles[page_index]
+                
+                if "error" in optimized:
+                    st.error(f"Błąd optymalizacji artykułu: {optimized.get('error', 'Nieznany błąd')}")
+                else:
+                    with st.expander("🚀 Zoptymalizowany Artykuł (SEO + Odwrócona Piramida)", expanded=True):
+                        st.success("✨ Artykuł został zoptymalizowany pod publikację internetową!")
+                        
+                        # Meta description
+                        if 'meta_description' in optimized:
+                            st.info(f"**Meta Description:** {optimized['meta_description']}")
+                        
+                        # Tytuł
+                        if 'optimized_title' in optimized:
+                            st.markdown(f"### {optimized['optimized_title']}")
+                            st.caption("⬆️ Zoptymalizowany tytuł SEO (H1)")
+                            st.divider()
+                        
+                        # Kluczowe punkty (key takeaways)
+                        if 'key_takeaways' in optimized and optimized['key_takeaways']:
+                            st.markdown("**📌 Kluczowe informacje:**")
+                            for point in optimized['key_takeaways']:
+                                st.markdown(f"• {point}")
+                            st.divider()
+                        
+                        # Zoptymalizowana treść
+                        if 'optimized_content' in optimized:
+                            st.markdown("**📄 Zoptymalizowana treść (struktura odwróconej piramidy):**")
+                            st.markdown(optimized['optimized_content'])
+                            st.divider()
+                            
+                            # Sugerowane linki wewnętrzne
+                            if 'suggested_internal_links' in optimized and optimized['suggested_internal_links']:
+                                st.markdown("**🔗 Sugerowane tematy do linkowania wewnętrznego:**")
+                                for link_topic in optimized['suggested_internal_links']:
+                                    st.markdown(f"• {link_topic}")
+                                st.divider()
+                            
+                            # Przyciski pobierania
+                            col1, col2 = st.columns(2)
+                            
+                            # Pobierz jako HTML
+                            optimized_html = markdown_to_clean_html(optimized['optimized_content'])
+                            optimized_doc = generate_full_html_document(
+                                optimized_html,
+                                title=optimized.get('optimized_title', 'Artykuł'),
+                                meta_title=optimized.get('optimized_title'),
+                                meta_description=optimized.get('meta_description')
+                            )
+                            
+                            col1.download_button(
+                                label="📥 Pobierz HTML",
+                                data=optimized_doc,
+                                file_name=f"{sanitize_filename(optimized.get('optimized_title', 'artykul'))}_optimized.html",
+                                mime="text/html",
+                                use_container_width=True,
+                                key=f"download_optimized_html_{page_index}"
+                            )
+                            
+                            # Pobierz jako Markdown
+                            col2.download_button(
+                                label="📥 Pobierz Markdown",
+                                data=optimized['optimized_content'],
+                                file_name=f"{sanitize_filename(optimized.get('optimized_title', 'artykul'))}_optimized.md",
+                                mime="text/markdown",
+                                use_container_width=True,
+                                key=f"download_optimized_md_{page_index}"
+                            )
         else:
             if st.session_state.processing_status == 'in_progress':
                 st.info("⏳ Strona oczekuje na przetworzenie...")
@@ -1615,6 +1848,19 @@ def handle_meta_tag_generation(page_index: int, raw_markdown: str):
         ai_processor = AIProcessor(st.session_state.api_key, st.session_state.model)
         tags = asyncio.run(ai_processor.generate_meta_tags(raw_markdown))
         st.session_state.meta_tags[page_index] = tags
+    
+    st.rerun()
+
+def handle_article_optimization(page_index: int, raw_markdown: str):
+    """Optymalizuje artykuł pod SEO i strukturę odwróconej piramidy"""
+    with st.spinner("🚀 Optymalizacja artykułu... To może chwilę potrwać."):
+        ai_processor = AIProcessor(st.session_state.api_key, st.session_state.model)
+        optimized = asyncio.run(ai_processor.generate_optimized_article(raw_markdown))
+        
+        # Zapisz zoptymalizowaną wersję
+        if 'optimized_articles' not in st.session_state:
+            st.session_state.optimized_articles = {}
+        st.session_state.optimized_articles[page_index] = optimized
     
     st.rerun()
 
