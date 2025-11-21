@@ -58,7 +58,7 @@ SESSION_STATE_DEFAULTS = {
     'api_key': None,
     'model': DEFAULT_MODEL,
     'meta_tags': {},
-    'seo_articles': {},  ##### NOWOŚĆ: Słownik do przechowywania zoptymalizowanych artykułów
+    'seo_articles': {},
     'project_loaded_and_waiting_for_file': False,
     'processing_mode': 'all',
     'start_page': 1,
@@ -241,12 +241,19 @@ class AIProcessor:
         return """Jesteś precyzyjnym asystentem redakcyjnym. Twoim celem jest przekształcenie surowego tekstu w czytelny, dobrze zorganizowany artykuł internetowy.
 
 ZASADA NADRZĘDNA: WIERNOŚĆ TREŚCI, ELASTYCZNOŚĆ FORMY.
-- Nie zmieniaj oryginalnych sformułowań ani nie parafrazuj tekstu. Przenieś treść 1:1.
-- Twoja rola polega na dodawaniu elementów strukturalnych (nagłówki, pogrubienia, podział na akapity).
+- Nie zmieniaj oryginalnych sformułowań ani nie parafrazuj tekstu (chyba że to konieczne dla czytelności). Przenieś treść 1:1.
+- Twoja rola polega na dodawaniu elementów strukturalnych i czyszczeniu śmieci.
 
-INSTRUKCJE SPECJALNE:
-1. Ignoruj i pomijaj numery stron oraz rozstrzelone daty.
-2. Etykiety jak "NEWS FLASH" używaj jako kontekstu, ale nie umieszczaj ich w finalnym tekście.
+INSTRUKCJE SPECJALNE (KRYTYCZNE):
+1. **LISTY:** Jeśli widzisz wyliczenia (punkty, myślniki), formatuj je jako standardową listę Markdown:
+   - Element listy 1
+   - Element listy 2
+2. **PRZYPISY/INDEKSY:** Jeśli wykryjesz indeksy przypisów (małe cyfry na końcu zdań lub słów), formatuj je używając tagu HTML: `<sup>1</sup>`, `<sup>2</sup>`.
+3. **USUWANIE PODPISÓW I ŚMIECI:** BEZWZGLĘDNIE USUWAJ:
+   - Podpisy pod zdjęciami (np. "Rys. 1. Widok...", "Fot. Jan Kowalski").
+   - Źródła grafik i tabel (np. "Źródło: opracowanie własne").
+   - Numery stron, nagłówki i stopki redakcyjne.
+   - Etykiety typu "NEWS FLASH".
 
 DOZWOLONE MODYFIKACJE STRUKTURALNE:
 1. Tytuł Główny: `# Tytuł`
@@ -273,19 +280,18 @@ WYMAGANIA:
 FORMAT ODPOWIEDZI:
 {"meta_title": "Tytuł meta", "meta_description": "Opis meta."}"""
 
-    ##### NOWOŚĆ: Prompt dla optymalizacji SEO #####
     def get_seo_prompt(self) -> str:
         """Zwraca prompt dla optymalizacji artykułu pod kątem SEO."""
         return """Jesteś światowej klasy strategiem SEO i copywriterem. Twoim zadaniem jest przepisanie dostarczonego artykułu, aby był maksymalnie zoptymalizowany pod kątem wyszukiwarek i angażujący dla czytelników online.
 
 ZASADY KRYTYCZNE:
-1.  **WIERNOŚĆ FAKTÓW**: Musisz bazować WYŁĄCZNIE na informacjach zawartych w oryginalnym tekście. Nie dodawaj żadnych nowych faktów, danych ani opinii. Twoja rola to restrukturyzacja i optymalizacja, a nie tworzenie nowej treści.
+1.  **WIERNOŚĆ FAKTÓW**: Musisz bazować WYŁĄCZNIE na informacjach zawartych w oryginalnym tekście. Nie dodawaj żadnych nowych faktów, danych ani opinii. Twoja rola to restrukturyzacja i optymalizacja.
 2.  **ODWRÓCONA PIRAMIDA**: Zastosuj zasadę odwróconej piramidy. Najważniejsze informacje, kluczowe wnioski i odpowiedzi na potencjalne pytania czytelnika umieść na samym początku artykułu.
 3.  **STRUKTURA I CZYTELNOŚĆ**:
     *   Stwórz nowy, chwytliwy tytuł zoptymalizowany pod kątem potencjalnych fraz kluczowych (H1).
     *   Podziel tekst na logiczne sekcje za pomocą śródtytułów (H2, H3).
-    *   Używaj krótkich akapitów.
-    *   Stosuj pogrubienia (`**tekst**`) dla najważniejszych terminów, fraz kluczowych i nazw własnych, aby ułatwić skanowanie tekstu.
+    *   Używaj list punktowanych, jeśli to możliwe, aby zwiększyć czytelność.
+    *   Stosuj pogrubienia (`**tekst**`) dla najważniejszych terminów.
 4.  **JĘZYK**: Używaj aktywnego, dynamicznego języka. Unikaj strony biernej. Pisz bezpośrednio do czytelnika.
 
 WYMAGANIA FORMATOWANIA:
@@ -293,7 +299,7 @@ WYMAGANIA FORMATOWANIA:
 - NIE używaj bloków kodu markdown (```json).
 
 FORMAT ODPOWIEDZI JSON:
-{"seo_title": "Nowy, zoptymalizowany pod SEO tytuł artykułu", "seo_article_markdown": "Pełna treść przepisanego artykułu w formacie Markdown, z nagłówkami i pogrubieniami."}"""
+{"seo_title": "Nowy, zoptymalizowany pod SEO tytuł artykułu", "seo_article_markdown": "Pełna treść przepisanego artykułu w formacie Markdown, z nagłówkami, listami i pogrubieniami."}"""
 
     async def process_text(self, text: str, system_prompt: str, max_tokens: int = 4096) -> Dict:
         """Przetwarza tekst przez OpenAI API"""
@@ -309,7 +315,7 @@ FORMAT ODPOWIEDZI JSON:
                         {"role": "user", "content": text}
                     ],
                     max_tokens=max_tokens,
-                    temperature=0.3, # nieco więcej kreatywności dla SEO
+                    temperature=0.3,
                     response_format={"type": "json_object"}
                 )
                 
@@ -404,39 +410,70 @@ FORMAT ODPOWIEDZI JSON:
         prompt = self.get_meta_tags_prompt()
         return await self.process_text(article_text[:4000], prompt, max_tokens=200)
 
-    ##### NOWOŚĆ: Metoda do generowania artykułu SEO #####
     async def generate_seo_article(self, article_text: str) -> Dict:
         """Przepisuje artykuł pod kątem SEO"""
         prompt = self.get_seo_prompt()
-        # Zwiększamy max_tokens, ponieważ AI przepisuje całą treść
         return await self.process_text(article_text, prompt, max_tokens=4096)
 
 # ===== FUNKCJE POMOCNICZE =====
 
 def markdown_to_html(text: str) -> str:
-    """Konwertuje markdown na HTML"""
+    """Konwertuje markdown na HTML z obsługą list i indeksów"""
+    # 1. Obsługa struktury nagłówków i linii
     text = text.replace('\n---\n', '\n<hr>\n')
     text = re.sub(r'^\s*# (.*?)\s*$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
     text = re.sub(r'^\s*## (.*?)\s*$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
     text = re.sub(r'^\s*### (.*?)\s*$', r'<h4>\1</h4>', text, flags=re.MULTILINE)
     text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
     
+    # 2. Obsługa list (zamiana linii z myślnikami na <ul><li>...</li></ul>)
+    lines = text.split('\n')
+    new_lines = []
+    in_list = False
+    
+    for line in lines:
+        stripped = line.strip()
+        # Wykrywanie elementu listy (myślnik lub gwiazdka na początku)
+        if stripped.startswith(('- ', '* ')):
+            if not in_list:
+                new_lines.append("<ul>")
+                in_list = True
+            content = stripped[2:] # Usunięcie "- "
+            new_lines.append(f"<li>{content}</li>")
+        else:
+            if in_list:
+                new_lines.append("</ul>")
+                in_list = False
+            new_lines.append(line)
+            
+    if in_list:
+        new_lines.append("</ul>")
+        
+    text = '\n'.join(new_lines)
+    
+    # 3. Podział na akapity (z pominięciem bloków, które już są HTMLem)
     paragraphs = text.split('\n\n')
     html_content = []
     
     for para in paragraphs:
-        if para.strip():
-            if para.strip().startswith(('<h', '<hr')):
-                html_content.append(para)
-            else:
-                html_content.append(f"<p>{para.strip().replace(chr(10), '<br>')}</p>")
+        stripped_para = para.strip()
+        if not stripped_para:
+            continue
+            
+        # Sprawdź czy to element blokowy HTML (nagłówek, lista, hr)
+        if stripped_para.startswith(('<h', '<hr', '<ul', '<li')):
+            html_content.append(stripped_para)
+        else:
+            # Zachowaj tagi <sup> jeśli są w tekście, zamień nową linię na <br>
+            formatted_para = stripped_para.replace(chr(10), '<br>')
+            html_content.append(f"<p>{formatted_para}</p>")
     
     return ''.join(html_content)
 
 def markdown_to_clean_html(markdown_text: str, page_number: int = None) -> str:
     """
     Konwertuje markdown na czysty HTML bez stylowania
-    Tylko struktura: h1, h2, h3, h4, p, strong, hr
+    Tylko struktura: h1-h4, p, strong, hr, ul, li, sup
     """
     html = markdown_text
     
@@ -447,9 +484,33 @@ def markdown_to_clean_html(markdown_text: str, page_number: int = None) -> str:
     html = re.sub(r'^\s*## (.*?)\s*$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
     html = re.sub(r'^\s*### (.*?)\s*$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
     html = re.sub(r'^\s*#### (.*?)\s*$', r'<h4>\1</h4>', html, flags=re.MULTILINE)
-    
     html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
+
+    # Obsługa list w czystym HTML
+    lines = html.split('\n')
+    new_lines = []
+    in_list = False
     
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(('- ', '* ')):
+            if not in_list:
+                new_lines.append("<ul>")
+                in_list = True
+            content = stripped[2:]
+            new_lines.append(f"<li>{content}</li>")
+        else:
+            if in_list:
+                new_lines.append("</ul>")
+                in_list = False
+            new_lines.append(line)
+    
+    if in_list:
+        new_lines.append("</ul>")
+        
+    html = '\n'.join(new_lines)
+    
+    # Podział na akapity
     paragraphs = html.split('\n\n')
     formatted_paragraphs = []
     
@@ -458,7 +519,8 @@ def markdown_to_clean_html(markdown_text: str, page_number: int = None) -> str:
         if not para:
             continue
         
-        if para.startswith(('<h1', '<h2', '<h3', '<h4', '<hr', '<p')):
+        # Jeśli linia zaczyna się od tagu HTML, nie pakuj jej w <p>
+        if para.startswith(('<h1', '<h2', '<h3', '<h4', '<hr', '<p', '<ul')):
             formatted_paragraphs.append(para)
         else:
             para_with_breaks = para.replace('\n', '<br>\n')
@@ -1228,7 +1290,6 @@ def render_page_view():
             ):
                 handle_meta_tag_generation(page_index, page_result['raw_markdown'])
             
-            ##### NOWOŚĆ: Przycisk do optymalizacji SEO #####
             if action_cols[2].button(
                 "🚀 Optymalizuj dla SEO",
                 key=f"seo_{page_index}",
@@ -1237,7 +1298,6 @@ def render_page_view():
                 help="Przepisz artykuł zgodnie z zasadami SEO"
             ):
                 handle_seo_generation(page_index, page_result['raw_markdown'])
-
 
             # Checkbox do pokazywania HTML
             show_html = action_cols[3].checkbox(
@@ -1308,7 +1368,6 @@ def render_page_view():
                             key=f"md_{page_index}"
                         )
             
-            ##### NOWOŚĆ: Wyświetlanie zoptymalizowanego artykułu SEO #####
             if page_index in st.session_state.seo_articles:
                 seo_result = st.session_state.seo_articles[page_index]
                 with st.expander("🤖 Zoptymalizowany Artykuł SEO", expanded=True):
@@ -1375,7 +1434,6 @@ def handle_meta_tag_generation(page_index: int, raw_markdown: str):
     
     st.rerun()
 
-##### NOWOŚĆ: Funkcja obsługująca generowanie artykułu SEO #####
 def handle_seo_generation(page_index: int, raw_markdown: str):
     """Generuje zoptymalizowaną wersję artykułu"""
     with st.spinner("🚀 Optymalizowanie artykułu dla SEO... To może chwilę potrwać."):
@@ -1467,9 +1525,8 @@ def main():
                 - Wyciąganie grafik ze stron
                 - Generowanie meta tagów SEO
                 - **Nowość! Optymalizacja artykułów pod kątem SEO**
-                - **Eksport do HTML** - czysty HTML bez stylowania
+                - **Eksport do HTML** - czysty HTML z obsługą list i przypisów
                 - Ponowne przetwarzanie stron z kontekstem
-                - **Automatyczna nawigacja** - przejście do zakresu po rozpoczęciu
                 """)
         return
     
